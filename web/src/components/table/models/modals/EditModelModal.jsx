@@ -31,9 +31,10 @@ import {
   Avatar,
   Col,
   Row,
+  InputNumber,
 } from '@douyinfe/semi-ui';
 import { Save, X, FileText } from 'lucide-react';
-import { IconLink } from '@douyinfe/semi-icons';
+import { IconLink, IconStar } from '@douyinfe/semi-icons';
 import { API, showError, showSuccess } from '../../../../helpers';
 import { useTranslation } from 'react-i18next';
 import { useIsMobile } from '../../../../hooks/common/useIsMobile';
@@ -122,6 +123,8 @@ const EditModelModal = (props) => {
     name_rule: props.editingModel?.model_name ? 0 : undefined, // 通过未配置模型过来的固定为精确匹配
     status: true,
     sync_official: true,
+    is_featured: false,
+    featured_order: 999,
   });
 
   const handleCancel = () => {
@@ -149,6 +152,10 @@ const EditModelModal = (props) => {
         // 处理status/sync_official，将数字转为布尔值
         data.status = data.status === 1;
         data.sync_official = (data.sync_official ?? 1) === 1;
+        // 处理is_featured，确保为布尔值
+        data.is_featured = data.is_featured === true || data.is_featured === 1;
+        // 处理featured_order，确保有默认值
+        data.featured_order = data.featured_order ?? 999;
         if (formApiRef.current) {
           formApiRef.current.setValues({ ...getInitValues(), ...data });
         }
@@ -196,6 +203,8 @@ const EditModelModal = (props) => {
         endpoints: values.endpoints || '',
         status: values.status ? 1 : 0,
         sync_official: values.sync_official ? 1 : 0,
+        is_featured: values.is_featured === true,
+        featured_order: values.featured_order ?? 999,
       };
 
       if (isEdit) {
@@ -523,6 +532,25 @@ const EditModelModal = (props) => {
                       field='status'
                       label={t('状态')}
                       size='large'
+                    />
+                  </Col>
+                  <Col span={24}>
+                    <Form.Switch
+                      field='is_featured'
+                      label={t('是否精选')}
+                      extraText={t('开启后，此模型将在精选模型列表中显示')}
+                      size='large'
+                    />
+                  </Col>
+                  <Col span={12}>
+                    <Form.InputNumber
+                      field='featured_order'
+                      label={t('精选排序')}
+                      placeholder={t('数字越小越靠前')}
+                      min={1}
+                      max={999}
+                      extraText={t('精选模型的显示顺序，数字越小越靠前')}
+                      style={{ width: '100%' }}
                     />
                   </Col>
                 </Row>

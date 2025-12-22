@@ -26,6 +26,7 @@ import {
   Modal,
   Tooltip,
 } from '@douyinfe/semi-ui';
+import { IconStar } from '@douyinfe/semi-icons';
 import {
   timestamp2string,
   getLobeHubIcon,
@@ -311,6 +312,24 @@ export const getModelsColumns = ({
           {val === 1 ? t('是') : t('否')}
         </Tag>
       ),
+    },
+    {
+      title: t('精选'),
+      dataIndex: 'is_featured',
+      width: 80,
+      align: 'center',
+      render: (val, record) => {
+        if (val === true || val === 1) {
+          return (
+            <Tooltip content={`${t('排序')}: ${record.featured_order ?? 999}`}>
+              <Tag size='small' shape='circle' color='amber' prefixIcon={<IconStar size='small' />}>
+                {record.featured_order ?? 999}
+              </Tag>
+            </Tooltip>
+          );
+        }
+        return <span className='text-gray-400'>-</span>;
+      },
     },
     {
       title: t('描述'),

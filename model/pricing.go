@@ -27,6 +27,8 @@ type Pricing struct {
 	CompletionRatio        float64                 `json:"completion_ratio"`
 	EnableGroup            []string                `json:"enable_groups"`
 	SupportedEndpointTypes []constant.EndpointType `json:"supported_endpoint_types"`
+	IsFeatured             bool                    `json:"is_featured"`
+	FeaturedOrder          int                     `json:"featured_order"`
 }
 
 type PricingVendor struct {
@@ -270,7 +272,7 @@ func updatePricing() {
 			SupportedEndpointTypes: modelSupportEndpointTypes[model],
 		}
 
-		// 补充模型元数据（描述、标签、供应商、状态）
+		// 补充模型元数据（描述、标签、供应商、状态、精选）
 		if meta, ok := metaMap[model]; ok {
 			// 若模型被禁用(status!=1)，则直接跳过，不返回给前端
 			if meta.Status != 1 {
@@ -280,6 +282,8 @@ func updatePricing() {
 			pricing.Icon = meta.Icon
 			pricing.Tags = meta.Tags
 			pricing.VendorID = meta.VendorID
+			pricing.IsFeatured = meta.IsFeatured
+			pricing.FeaturedOrder = meta.FeaturedOrder
 		}
 		modelPrice, findPrice := ratio_setting.GetModelPrice(model, false)
 		if findPrice {
