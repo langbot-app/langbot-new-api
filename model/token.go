@@ -362,3 +362,72 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 
 	return len(tokens), nil
 }
+
+// ===================== Admin Token Management Functions =====================
+
+// GetAllTokensByUserId 管理员获取指定用户的所有Token（不验证当前用户身份）
+func GetAllTokensByUserId(userId int, startIdx int, num int) ([]*Token, error) {
+	var tokens []*Token
+	err := DB.Where("user_id = ?", userId).Order("id desc").Limit(num).Offset(startIdx).Find(&tokens).Error
+	return tokens, err
+}
+
+// CountTokensByUserId 统计指定用户的Token数量
+func CountTokensByUserId(userId int) (int64, error) {
+	var total int64
+	err := DB.Model(&Token{}).Where("user_id = ?", userId).Count(&total).Error
+	return total, err
+}
+
+// SearchTokensByUserId 管理员搜索指定用户的Token
+func SearchTokensByUserId(userId int, keyword string, tokenKey string) ([]*Token, error) {
+	var tokens []*Token
+	if tokenKey != "" {
+		tokenKey = strings.TrimPrefix(tokenKey, "sk-")
+	}
+	err := DB.Where("user_id = ?", userId).
+		Where("name LIKE ?", "%"+keyword+"%").
+		Where(commonKeyCol+" LIKE ?", "%"+tokenKey+"%").
+		Find(&tokens).Error
+	return tokens, err
+}
+
+// GetTokenByIdAdmin 管理员通过ID获取Token（不验证用户身份）
+func GetTokenByIdAdmin(id int) (*Token, error) {
+	if id == 0 {
+		return nil, errors.New("id 为空！")
+	}
+	var token Token
+	err := DB.First(&token, "id = ?", id).Error
+	return &token, err
+}
+
+// DeleteTokenByIdAdmin 管理员删除Token（不验证用户身份）
+func DeleteTokenByIdAdmin(id int) (err error) {
+	if id == 0 {
+		return errors.New("id 为空！")
+	}
+	var token Token
+	err = DB.First(&token, "id = ?", id).Error
+	if err != nil {
+		return err
+	}
+	return token.Delete()
+}
+
+// UpdateTokenAdmin 管理员更新Token（完整更新）
+func UpdateTokenAdmin(token *Token) (err error) {
+	defer func() {
+		if shouldUpdateRedis(true, err) {
+			gopool.Go(func() {
+				err := cacheSetToken(*token)
+				if err != nil {
+					common.SysLog("failed to update token cache: " + err.Error())
+				}
+			})
+		}
+	}()
+	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
+		"model_limits_enabled", "model_limits", "allow_ips", "group").Updates(token).Error
+	return err
+}

@@ -226,6 +226,18 @@ func SetApiRouter(router *gin.Engine) {
 		mjRoute.GET("/self", middleware.UserAuth(), controller.GetUserMidjourney)
 		mjRoute.GET("/", middleware.AdminAuth(), controller.GetAllMidjourney)
 
+		// Admin Token Management Routes
+		adminTokenRoute := apiRouter.Group("/admin/token")
+		adminTokenRoute.Use(middleware.AdminAuth())
+		{
+			adminTokenRoute.GET("/user/:user_id", controller.AdminGetUserTokens)
+			adminTokenRoute.GET("/user/:user_id/search", controller.AdminSearchUserTokens)
+			adminTokenRoute.GET("/:id", controller.AdminGetToken)
+			adminTokenRoute.POST("/user/:user_id", controller.AdminCreateToken)
+			adminTokenRoute.PUT("/", controller.AdminUpdateToken)
+			adminTokenRoute.DELETE("/:id", controller.AdminDeleteToken)
+		}
+
 		taskRoute := apiRouter.Group("/task")
 		{
 			taskRoute.GET("/self", middleware.UserAuth(), controller.GetUserTask)

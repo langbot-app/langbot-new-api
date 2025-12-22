@@ -287,3 +287,240 @@ func DeleteTokenBatch(c *gin.Context) {
 		"data":    count,
 	})
 }
+
+// ===================== Admin Token Management API =====================
+
+// AdminGetUserTokens 管理员获取指定用户的所有Token
+// GET /api/admin/token/user/:user_id
+func AdminGetUserTokens(c *gin.Context) {
+	userId, err := strconv.Atoi(c.Param("user_id"))
+	if err != nil || userId == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	pageInfo := common.GetPageQuery(c)
+	tokens, err := model.GetAllTokensByUserId(userId, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	total, _ := model.CountTokensByUserId(userId)
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(tokens)
+	common.ApiSuccess(c, pageInfo)
+}
+
+// AdminSearchUserTokens 管理员搜索指定用户的Token
+// GET /api/admin/token/user/:user_id/search
+func AdminSearchUserTokens(c *gin.Context) {
+	userId, err := strconv.Atoi(c.Param("user_id"))
+	if err != nil || userId == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	keyword := c.Query("keyword")
+	token := c.Query("token")
+	tokens, err := model.SearchTokensByUserId(userId, keyword, token)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    tokens,
+	})
+}
+
+// AdminGetToken 管理员获取指定Token详情
+// GET /api/admin/token/:id
+func AdminGetToken(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "无效的Token ID",
+		})
+		return
+	}
+
+	token, err := model.GetTokenByIdAdmin(id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    token,
+	})
+}
+
+// AdminCreateToken 管理员为指定用户创建Token
+// POST /api/admin/token/user/:user_id
+func AdminCreateToken(c *gin.Context) {
+	userId, err := strconv.Atoi(c.Param("user_id"))
+	if err != nil || userId == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "无效的用户ID",
+		})
+		return
+	}
+
+	// 验证用户是否存在
+	_, err = model.GetUserById(userId, false)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "用户不存在",
+		})
+		return
+	}
+
+	token := model.Token{}
+	err = c.ShouldBindJSON(&token)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if len(token.Name) > 30 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "令牌名称过长",
+		})
+		return
+	}
+
+	key, err := common.GenerateKey()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "生成令牌失败",
+		})
+		common.SysLog("failed to generate token key: " + err.Error())
+		return
+	}
+
+	cleanToken := model.Token{
+		UserId:             userId, // 使用URL参数中的用户ID
+		Name:               token.Name,
+		Key:                key,
+		CreatedTime:        common.GetTimestamp(),
+		AccessedTime:       common.GetTimestamp(),
+		ExpiredTime:        token.ExpiredTime,
+		RemainQuota:        token.RemainQuota,
+		UnlimitedQuota:     token.UnlimitedQuota,
+		ModelLimitsEnabled: token.ModelLimitsEnabled,
+		ModelLimits:        token.ModelLimits,
+		AllowIps:           token.AllowIps,
+		Group:              token.Group,
+	}
+	err = cleanToken.Insert()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    cleanToken,
+	})
+}
+
+// AdminUpdateToken 管理员更新Token
+// PUT /api/admin/token
+func AdminUpdateToken(c *gin.Context) {
+	statusOnly := c.Query("status_only")
+	token := model.Token{}
+	err := c.ShouldBindJSON(&token)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if len(token.Name) > 30 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "令牌名称过长",
+		})
+		return
+	}
+
+	cleanToken, err := model.GetTokenByIdAdmin(token.Id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	if token.Status == common.TokenStatusEnabled {
+		if cleanToken.Status == common.TokenStatusExpired && cleanToken.ExpiredTime <= common.GetTimestamp() && cleanToken.ExpiredTime != -1 {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "令牌已过期，无法启用，请先修改令牌过期时间，或者设置为永不过期",
+			})
+			return
+		}
+		if cleanToken.Status == common.TokenStatusExhausted && cleanToken.RemainQuota <= 0 && !cleanToken.UnlimitedQuota {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "令牌可用额度已用尽，无法启用，请先修改令牌剩余额度，或者设置为无限额度",
+			})
+			return
+		}
+	}
+
+	if statusOnly != "" {
+		cleanToken.Status = token.Status
+	} else {
+		cleanToken.Name = token.Name
+		cleanToken.ExpiredTime = token.ExpiredTime
+		cleanToken.RemainQuota = token.RemainQuota
+		cleanToken.UnlimitedQuota = token.UnlimitedQuota
+		cleanToken.ModelLimitsEnabled = token.ModelLimitsEnabled
+		cleanToken.ModelLimits = token.ModelLimits
+		cleanToken.AllowIps = token.AllowIps
+		cleanToken.Group = token.Group
+	}
+
+	err = model.UpdateTokenAdmin(cleanToken)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    cleanToken,
+	})
+}
+
+// AdminDeleteToken 管理员删除Token
+// DELETE /api/admin/token/:id
+func AdminDeleteToken(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "无效的Token ID",
+		})
+		return
+	}
+
+	err = model.DeleteTokenByIdAdmin(id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+	})
+}
