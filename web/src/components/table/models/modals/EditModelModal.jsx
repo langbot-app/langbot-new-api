@@ -125,6 +125,7 @@ const EditModelModal = (props) => {
     sync_official: true,
     is_featured: false,
     featured_order: 999,
+    category: '',
   });
 
   const handleCancel = () => {
@@ -154,6 +155,8 @@ const EditModelModal = (props) => {
         data.sync_official = (data.sync_official ?? 1) === 1;
         // 处理is_featured，确保为布尔值
         data.is_featured = data.is_featured === true || data.is_featured === 1;
+        // 处理category，确保有默认值
+        data.category = data.category || '';
         // 处理featured_order，确保有默认值
         data.featured_order = data.featured_order ?? 999;
         if (formApiRef.current) {
@@ -205,6 +208,7 @@ const EditModelModal = (props) => {
         sync_official: values.sync_official ? 1 : 0,
         is_featured: values.is_featured === true,
         featured_order: values.featured_order ?? 999,
+        category: values.category || '',
       };
 
       if (isEdit) {
@@ -540,6 +544,19 @@ const EditModelModal = (props) => {
                       label={t('是否精选')}
                       extraText={t('开启后，此模型将在精选模型列表中显示')}
                       size='large'
+                    />
+                  </Col>
+                  <Col span={12}>
+                    <Form.Select
+                      field='category'
+                      label={t('模型类型')}
+                      placeholder={t('请选择模型类型')}
+                      optionList={[
+                        { label: t('未分类'), value: '' },
+                        { label: t('对话模型'), value: 'chat' },
+                        { label: t('文本嵌入模型'), value: 'embedding' },
+                      ]}
+                      style={{ width: '100%' }}
                     />
                   </Col>
                   <Col span={12}>

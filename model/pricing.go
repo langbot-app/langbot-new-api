@@ -29,6 +29,7 @@ type Pricing struct {
 	SupportedEndpointTypes []constant.EndpointType `json:"supported_endpoint_types"`
 	IsFeatured             bool                    `json:"is_featured"`
 	FeaturedOrder          int                     `json:"featured_order"`
+	Category               string                  `json:"category,omitempty"`
 }
 
 type PricingVendor struct {
@@ -284,6 +285,7 @@ func updatePricing() {
 			pricing.VendorID = meta.VendorID
 			pricing.IsFeatured = meta.IsFeatured
 			pricing.FeaturedOrder = meta.FeaturedOrder
+			pricing.Category = meta.Category
 		}
 		modelPrice, findPrice := ratio_setting.GetModelPrice(model, false)
 		if findPrice {

@@ -31,6 +31,7 @@ type Model struct {
 	Status        int            `json:"status" gorm:"default:1"`
 	SyncOfficial  int            `json:"sync_official" gorm:"default:1"`
 	IsFeatured    bool           `json:"is_featured" gorm:"default:false"`
+	Category      string         `json:"category" gorm:"type:varchar(32);default:''"`
 	FeaturedOrder int            `json:"featured_order" gorm:"default:999"`
 	CreatedTime   int64          `json:"created_time" gorm:"bigint"`
 	UpdatedTime   int64          `json:"updated_time" gorm:"bigint"`

@@ -332,6 +332,22 @@ export const getModelsColumns = ({
       },
     },
     {
+      title: t('模型类型'),
+      dataIndex: 'category',
+      width: 100,
+      render: (val) => {
+        const categoryMap = {
+          'chat': { label: t('对话模型'), color: 'blue' },
+          'embedding': { label: t('文本嵌入'), color: 'green' },
+        };
+        const cat = categoryMap[val];
+        if (cat) {
+          return <Tag size='small' color={cat.color}>{cat.label}</Tag>;
+        }
+        return <span className='text-gray-400'>-</span>;
+      },
+    },
+    {
       title: t('描述'),
       dataIndex: 'description',
       render: (text) => renderDescription(text, 200),
