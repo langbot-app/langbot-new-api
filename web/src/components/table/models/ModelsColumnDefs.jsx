@@ -335,16 +335,33 @@ export const getModelsColumns = ({
       title: t('模型类型'),
       dataIndex: 'category',
       width: 100,
-      render: (val) => {
+      render: (val, record) => {
         const categoryMap = {
           'chat': { label: t('对话模型'), color: 'blue' },
           'embedding': { label: t('文本嵌入'), color: 'green' },
         };
         const cat = categoryMap[val];
-        if (cat) {
-          return <Tag size='small' color={cat.color}>{cat.label}</Tag>;
+        if (!cat) {
+          return <span className='text-gray-400'>-</span>;
         }
-        return <span className='text-gray-400'>-</span>;
+        // 解析 llm_abilities
+        let abilities = [];
+        if (val === 'chat' && record.llm_abilities) {
+          try {
+            abilities = typeof record.llm_abilities === 'string'
+              ? JSON.parse(record.llm_abilities)
+              : record.llm_abilities;
+          } catch {}
+        }
+        const abilityLabels = { vision: t('视觉'), func_call: t('函数') };
+        return (
+          <Space spacing={4}>
+            <Tag size='small' color={cat.color}>{cat.label}</Tag>
+            {abilities.map(a => (
+              <Tag key={a} size='small' color='light-blue'>{abilityLabels[a] || a}</Tag>
+            ))}
+          </Space>
+        );
       },
     },
     {

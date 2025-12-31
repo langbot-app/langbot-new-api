@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/google/uuid"
 
 	"gorm.io/gorm"
 )
@@ -22,6 +23,7 @@ type BoundChannel struct {
 
 type Model struct {
 	Id            int            `json:"id"`
+	UUID          string         `json:"uuid" gorm:"type:varchar(36);uniqueIndex"`
 	ModelName     string         `json:"model_name" gorm:"size:128;not null;uniqueIndex:uk_model_name_delete_at,priority:1"`
 	Description   string         `json:"description,omitempty" gorm:"type:text"`
 	Icon          string         `json:"icon,omitempty" gorm:"type:varchar(128)"`
@@ -32,6 +34,7 @@ type Model struct {
 	SyncOfficial  int            `json:"sync_official" gorm:"default:1"`
 	IsFeatured    bool           `json:"is_featured" gorm:"default:false"`
 	Category      string         `json:"category" gorm:"type:varchar(32);default:''"`
+	LLMAbilities  string         `json:"llm_abilities" gorm:"type:varchar(128);default:''"` // JSON array: ["vision","func_call"]
 	FeaturedOrder int            `json:"featured_order" gorm:"default:999"`
 	CreatedTime   int64          `json:"created_time" gorm:"bigint"`
 	UpdatedTime   int64          `json:"updated_time" gorm:"bigint"`
@@ -50,6 +53,9 @@ func (mi *Model) Insert() error {
 	now := common.GetTimestamp()
 	mi.CreatedTime = now
 	mi.UpdatedTime = now
+	if mi.UUID == "" {
+		mi.UUID = uuid.New().String()
+	}
 	return DB.Create(mi).Error
 }
 
@@ -67,7 +73,7 @@ func (mi *Model) Update() error {
 	return DB.Session(&gorm.Session{AllowGlobalUpdate: false, FullSaveAssociations: false}).
 		Model(&Model{}).
 		Where("id = ?", mi.Id).
-		Omit("created_time").
+		Omit("created_time", "uuid").
 		Select("*").
 		Updates(mi).Error
 }

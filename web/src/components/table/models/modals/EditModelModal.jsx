@@ -126,6 +126,7 @@ const EditModelModal = (props) => {
     is_featured: false,
     featured_order: 999,
     category: '',
+    llm_abilities: [],
   });
 
   const handleCancel = () => {
@@ -157,6 +158,16 @@ const EditModelModal = (props) => {
         data.is_featured = data.is_featured === true || data.is_featured === 1;
         // 处理category，确保有默认值
         data.category = data.category || '';
+        // 处理llm_abilities，解析JSON字符串为数组
+        if (data.llm_abilities) {
+          try {
+            data.llm_abilities = JSON.parse(data.llm_abilities);
+          } catch {
+            data.llm_abilities = [];
+          }
+        } else {
+          data.llm_abilities = [];
+        }
         // 处理featured_order，确保有默认值
         data.featured_order = data.featured_order ?? 999;
         if (formApiRef.current) {
@@ -209,6 +220,9 @@ const EditModelModal = (props) => {
         is_featured: values.is_featured === true,
         featured_order: values.featured_order ?? 999,
         category: values.category || '',
+        llm_abilities: values.category === 'chat' && values.llm_abilities?.length > 0
+          ? JSON.stringify(values.llm_abilities)
+          : '',
       };
 
       if (isEdit) {
@@ -509,7 +523,7 @@ const EditModelModal = (props) => {
                                         'endpoints',
                                         JSON.stringify(groupObj, null, 2),
                                       );
-                                    } catch {}
+                                    } catch { }
                                   }
                                 }}
                               >
@@ -538,15 +552,8 @@ const EditModelModal = (props) => {
                       size='large'
                     />
                   </Col>
+
                   <Col span={24}>
-                    <Form.Switch
-                      field='is_featured'
-                      label={t('是否精选')}
-                      extraText={t('开启后，此模型将在精选模型列表中显示')}
-                      size='large'
-                    />
-                  </Col>
-                  <Col span={12}>
                     <Form.Select
                       field='category'
                       label={t('模型类型')}
@@ -559,7 +566,27 @@ const EditModelModal = (props) => {
                       style={{ width: '100%' }}
                     />
                   </Col>
-                  <Col span={12}>
+                  {values.category === 'chat' && (
+                    <Col span={12}>
+                      <Form.CheckboxGroup
+                        field='llm_abilities'
+                        label={t('模型能力')}
+                        options={[
+                          { label: t('视觉理解'), value: 'vision' },
+                          { label: t('函数调用'), value: 'func_call' },
+                        ]}
+                      />
+                    </Col>
+                  )}
+                  <Col span={24}>
+                    <Form.Switch
+                      field='is_featured'
+                      label={t('是否精选')}
+                      extraText={t('开启后，此模型将在精选模型列表中显示')}
+                      size='large'
+                    />
+                  </Col>
+                  <Col span={24}>
                     <Form.InputNumber
                       field='featured_order'
                       label={t('精选排序')}

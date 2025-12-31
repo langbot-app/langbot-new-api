@@ -15,6 +15,7 @@ import (
 )
 
 type Pricing struct {
+	UUID                   string                  `json:"uuid,omitempty"`
 	ModelName              string                  `json:"model_name"`
 	Description            string                  `json:"description,omitempty"`
 	Icon                   string                  `json:"icon,omitempty"`
@@ -30,6 +31,7 @@ type Pricing struct {
 	IsFeatured             bool                    `json:"is_featured"`
 	FeaturedOrder          int                     `json:"featured_order"`
 	Category               string                  `json:"category,omitempty"`
+	LLMAbilities           []string                `json:"llm_abilities,omitempty"`
 }
 
 type PricingVendor struct {
@@ -279,6 +281,7 @@ func updatePricing() {
 			if meta.Status != 1 {
 				continue
 			}
+			pricing.UUID = meta.UUID
 			pricing.Description = meta.Description
 			pricing.Icon = meta.Icon
 			pricing.Tags = meta.Tags
@@ -286,6 +289,12 @@ func updatePricing() {
 			pricing.IsFeatured = meta.IsFeatured
 			pricing.FeaturedOrder = meta.FeaturedOrder
 			pricing.Category = meta.Category
+			if meta.Category == "chat" && meta.LLMAbilities != "" {
+				var abilities []string
+				if json.Unmarshal([]byte(meta.LLMAbilities), &abilities) == nil {
+					pricing.LLMAbilities = abilities
+				}
+			}
 		}
 		modelPrice, findPrice := ratio_setting.GetModelPrice(model, false)
 		if findPrice {
