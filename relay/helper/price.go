@@ -75,7 +75,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 				acceptUnsetRatio = true
 			}
 			if !acceptUnsetRatio {
-				return types.PriceData{}, fmt.Errorf("model %s ratio or price not set, please contact admin or enable self-use mode", matchName)
+				return types.PriceData{}, fmt.Errorf("model %s not available, please contact customer service", matchName)
 			}
 		}
 		completionRatio = ratio_setting.GetCompletionRatio(info.OriginModelName)
