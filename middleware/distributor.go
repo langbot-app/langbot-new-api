@@ -103,7 +103,7 @@ func Distribute() func(c *gin.Context) {
 					if usingGroup == "auto" {
 						showGroup = fmt.Sprintf("auto(%s)", selectGroup)
 					}
-					message := fmt.Sprintf("获取分组 %s 下模型 %s 的可用渠道失败（distributor）: %s", showGroup, modelRequest.Model, err.Error())
+					message := fmt.Sprintf("failed to get available channel for model %s in group %s (distributor): %s", modelRequest.Model, showGroup, err.Error())
 					// 如果错误，但是渠道不为空，说明是数据库一致性问题
 					//if channel != nil {
 					//	common.SysError(fmt.Sprintf("渠道不存在：%d", channel.Id))
@@ -113,7 +113,7 @@ func Distribute() func(c *gin.Context) {
 					return
 				}
 				if channel == nil {
-					abortWithOpenAiMessage(c, http.StatusServiceUnavailable, fmt.Sprintf("分组 %s 下模型 %s 无可用渠道（distributor）", usingGroup, modelRequest.Model), string(types.ErrorCodeModelNotFound))
+					abortWithOpenAiMessage(c, http.StatusServiceUnavailable, fmt.Sprintf("no available channel for model %s in group %s (distributor)", modelRequest.Model, usingGroup), string(types.ErrorCodeModelNotFound))
 					return
 				}
 			}
@@ -133,7 +133,7 @@ func getModelFromRequest(c *gin.Context) (*ModelRequest, error) {
 	var modelRequest ModelRequest
 	err := common.UnmarshalBodyReusable(c, &modelRequest)
 	if err != nil {
-		return nil, errors.New("无效的请求, " + err.Error())
+		return nil, errors.New("invalid request, " + err.Error())
 	}
 	return &modelRequest, nil
 }
@@ -161,7 +161,7 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			}
 			if midjourneyModel == "" {
 				if !success {
-					return nil, false, fmt.Errorf("无效的请求, 无法解析模型")
+					return nil, false, fmt.Errorf("invalid request, unable to parse model")
 				} else {
 					// task fetch, task fetch by condition, notify
 					shouldSelectChannel = false

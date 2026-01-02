@@ -24,7 +24,7 @@ type ClaudeError struct {
 type ErrorType string
 
 const (
-	ErrorTypeNewAPIError     ErrorType = "new_api_error"
+	ErrorTypeNewAPIError     ErrorType = "model_service_error"
 	ErrorTypeOpenAIError     ErrorType = "openai_error"
 	ErrorTypeClaudeError     ErrorType = "claude_error"
 	ErrorTypeMidjourneyError ErrorType = "midjourney_error"
@@ -203,7 +203,7 @@ type NewAPIErrorOptions func(*NewAPIError)
 
 func NewError(err error, errorCode ErrorCode, ops ...NewAPIErrorOptions) *NewAPIError {
 	var newErr *NewAPIError
-	// 保留深层传递的 new err
+	// Preserve the nested NewAPIError from deep calls
 	if errors.As(err, &newErr) {
 		for _, op := range ops {
 			op(newErr)
@@ -225,7 +225,7 @@ func NewError(err error, errorCode ErrorCode, ops ...NewAPIErrorOptions) *NewAPI
 
 func NewOpenAIError(err error, errorCode ErrorCode, statusCode int, ops ...NewAPIErrorOptions) *NewAPIError {
 	var newErr *NewAPIError
-	// 保留深层传递的 new err
+	// Preserve the nested NewAPIError from deep calls
 	if errors.As(err, &newErr) {
 		if newErr.RelayError == nil {
 			openaiError := OpenAIError{

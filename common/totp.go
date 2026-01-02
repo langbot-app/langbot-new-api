@@ -124,18 +124,18 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// ValidateNumericCode 验证数字验证码格式
+// ValidateNumericCode validates numeric verification code format
 func ValidateNumericCode(code string) (string, error) {
-	// 移除空格
+	// Remove spaces
 	code = strings.ReplaceAll(code, " ", "")
 
 	if len(code) != 6 {
-		return "", fmt.Errorf("验证码必须是6位数字")
+		return "", fmt.Errorf("verification code must be 6 digits")
 	}
 
-	// 检查是否为纯数字
+	// Check if it's a pure number
 	if _, err := strconv.Atoi(code); err != nil {
-		return "", fmt.Errorf("验证码只能包含数字")
+		return "", fmt.Errorf("verification code can only contain digits")
 	}
 
 	return code, nil

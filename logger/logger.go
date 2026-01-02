@@ -97,13 +97,13 @@ func logHelper(ctx context.Context, level string, msg string) {
 }
 
 func LogQuota(quota int) string {
-	// 新逻辑：根据额度展示类型输出
+	// Format quota based on display type setting
 	q := float64(quota)
 	switch operation_setting.GetQuotaDisplayType() {
 	case operation_setting.QuotaDisplayTypeCNY:
 		usd := q / common.QuotaPerUnit
 		cny := usd * operation_setting.USDExchangeRate
-		return fmt.Sprintf("¥%.6f 额度", cny)
+		return fmt.Sprintf("¥%.6f quota", cny)
 	case operation_setting.QuotaDisplayTypeCustom:
 		usd := q / common.QuotaPerUnit
 		rate := operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate
@@ -115,11 +115,11 @@ func LogQuota(quota int) string {
 			rate = 1
 		}
 		v := usd * rate
-		return fmt.Sprintf("%s%.6f 额度", symbol, v)
+		return fmt.Sprintf("%s%.6f quota", symbol, v)
 	case operation_setting.QuotaDisplayTypeTokens:
-		return fmt.Sprintf("%d 点额度", quota)
+		return fmt.Sprintf("%d tokens", quota)
 	default: // USD
-		return fmt.Sprintf("＄%.6f 额度", q/common.QuotaPerUnit)
+		return fmt.Sprintf("＄%.6f quota", q/common.QuotaPerUnit)
 	}
 }
 
