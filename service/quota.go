@@ -95,6 +95,11 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 		return err
 	}
 
+	// Check if user quota is already negative or zero
+	if userQuota <= 0 {
+		return fmt.Errorf("insufficient user quota, remaining: %s", logger.FormatQuota(userQuota))
+	}
+
 	token, err := model.GetTokenByKey(strings.TrimLeft(relayInfo.TokenKey, "sk-"), false)
 	if err != nil {
 		return err
@@ -504,6 +509,14 @@ func PreConsumeTokenQuota(relayInfo *relaycommon.RelayInfo, quota int) error {
 func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) (err error) {
 
 	if quota > 0 {
+		// Check if user has sufficient quota before decreasing
+		userQuota, err := model.GetUserQuota(relayInfo.UserId, true)
+		if err != nil {
+			return err
+		}
+		if userQuota < quota {
+			return fmt.Errorf("insufficient user quota for post-consumption, remaining: %s, required: %s", logger.FormatQuota(userQuota), logger.FormatQuota(quota))
+		}
 		err = model.DecreaseUserQuota(relayInfo.UserId, quota)
 	} else {
 		err = model.IncreaseUserQuota(relayInfo.UserId, -quota, false)

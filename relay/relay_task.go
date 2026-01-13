@@ -89,7 +89,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.
 		return
 	}
 	quota := int(ratio * common.QuotaPerUnit)
-	if userQuota-quota < 0 {
+	if userQuota <= 0 || userQuota-quota < 0 {
 		taskErr = service.TaskErrorWrapperLocal(errors.New("user quota is not enough"), "quota_not_enough", http.StatusForbidden)
 		return
 	}

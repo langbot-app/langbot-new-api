@@ -806,11 +806,19 @@ func DecreaseUserQuota(id int, quota int) (err error) {
 }
 
 func decreaseUserQuota(id int, quota int) (err error) {
-	err = DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota - ?", quota)).Error
-	if err != nil {
-		return err
+	// Update quota with a constraint to prevent it from going negative
+	result := DB.Model(&User{}).Where("id = ? AND quota >= ?", id, quota).Update("quota", gorm.Expr("quota - ?", quota))
+	if result.Error != nil {
+		return result.Error
 	}
-	return err
+	// Check if any rows were affected - if not, it means quota was insufficient
+	if result.RowsAffected == 0 {
+		// Re-fetch current quota for error message
+		var currentQuota int
+		DB.Model(&User{}).Where("id = ?", id).Select("quota").Find(&currentQuota)
+		return fmt.Errorf("insufficient quota to decrease: current quota is %s, attempted to decrease by %s", logger.FormatQuota(currentQuota), logger.FormatQuota(quota))
+	}
+	return nil
 }
 
 func DeltaUpdateUserQuota(id int, delta int) (err error) {
