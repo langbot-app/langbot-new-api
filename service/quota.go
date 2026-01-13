@@ -95,6 +95,11 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 		return err
 	}
 
+	// Check if user quota is already negative or zero
+	if userQuota <= 0 {
+		return fmt.Errorf("insufficient user quota, remaining: %s", logger.FormatQuota(userQuota))
+	}
+
 	token, err := model.GetTokenByKey(strings.TrimLeft(relayInfo.TokenKey, "sk-"), false)
 	if err != nil {
 		return err
