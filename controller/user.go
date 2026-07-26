@@ -1099,11 +1099,22 @@ func ManageUser(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
+	if req.Id <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgUserNotExists)
+		return
+	}
 	user := model.User{
 		Id: req.Id,
 	}
 	// Fill attributes
-	model.DB.Unscoped().Where(&user).First(&user)
+	if err := model.DB.Unscoped().Where(&user).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			common.ApiErrorI18n(c, i18n.MsgUserNotExists)
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
 	if user.Id == 0 {
 		common.ApiErrorI18n(c, i18n.MsgUserNotExists)
 		return
@@ -1170,13 +1181,15 @@ func ManageUser(c *gin.Context) {
 		}
 		user.Role = common.RoleCommonUser
 	case "add_quota":
+		var newQuota int
 		switch req.Mode {
 		case "add":
 			if req.Value <= 0 {
 				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
 				return
 			}
-			if err := model.IncreaseUserQuota(user.Id, req.Value, true); err != nil {
+			newQuota, err = model.IncreaseUserQuotaAndGet(user.Id, req.Value)
+			if err != nil {
 				common.ApiError(c, err)
 				return
 			}
@@ -1188,7 +1201,8 @@ func ManageUser(c *gin.Context) {
 				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
 				return
 			}
-			if err := model.DecreaseUserQuota(user.Id, req.Value, true); err != nil {
+			newQuota, err = model.DecreaseUserQuotaAndGet(user.Id, req.Value)
+			if err != nil {
 				common.ApiError(c, err)
 				return
 			}
@@ -1196,11 +1210,12 @@ func ManageUser(c *gin.Context) {
 				"quota": logger.LogQuota(req.Value),
 			})
 		case "override":
-			oldQuota := user.Quota
-			if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("quota", req.Value).Error; err != nil {
+			oldQuota, resultingQuota, err := model.OverrideUserQuotaAndGet(user.Id, req.Value)
+			if err != nil {
 				common.ApiError(c, err)
 				return
 			}
+			newQuota = resultingQuota
 			recordManageAuditFor(c, user.Id, "user.quota_override", map[string]interface{}{
 				"from": logger.LogQuota(oldQuota),
 				"to":   logger.LogQuota(req.Value),
@@ -1209,10 +1224,7 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "",
-		})
+		common.ApiSuccess(c, gin.H{"quota": newQuota})
 		return
 	default:
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)

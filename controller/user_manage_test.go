@@ -159,3 +159,65 @@ func TestManageUserDeleteReturnsImmediatelyAndUnknownActionFails(t *testing.T) {
 	assert.EqualValues(t, 1, unchanged.AuthVersion)
 	assert.Equal(t, common.UserStatusEnabled, unchanged.Status)
 }
+
+func TestManageUserQuotaReturnsAuthoritativeDataObject(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250}`, user.Id))
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	var response struct {
+		Success bool           `json:"success"`
+		Data    map[string]int `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, map[string]int{"quota": 1250}, response.Data)
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1250, updated.Quota)
+}
+
+func TestManageUserQuotaRejectsNegativeOverride(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-negative-quota-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"override","value":-1}`, user.Id))
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1000, updated.Quota)
+}
+
+func TestManageUserQuotaRejectsMissingUser(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-omitted-id-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	recorder := performManageUserRequest(t, `{"id":404,"action":"add_quota","mode":"add","value":250}`)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+
+	recorder = performManageUserRequest(t, `{"action":"add_quota","mode":"add","value":250}`)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1000, updated.Quota)
+}

@@ -788,7 +788,6 @@ func (user *User) EditWithTx(tx *gorm.DB, updatePassword bool) error {
 		"username":     newUser.Username,
 		"display_name": newUser.DisplayName,
 		"group":        newUser.Group,
-		"quota":        newUser.Quota,
 		"remark":       newUser.Remark,
 	}
 	if updatePassword {
@@ -1247,6 +1246,13 @@ func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	return increaseUserQuota(id, quota)
 }
 
+func IncreaseUserQuotaAndGet(id int, quota int) (int, error) {
+	if quota < 0 {
+		return 0, errors.New("quota 不能为负数！")
+	}
+	return deltaUserQuotaAndGet(id, quota)
+}
+
 func increaseUserQuota(id int, quota int) (err error) {
 	err = DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", quota)).Error
 	if err != nil {
@@ -1270,6 +1276,13 @@ func DecreaseUserQuota(id int, quota int, db bool) (err error) {
 	return nil
 }
 
+func DecreaseUserQuotaAndGet(id int, quota int) (int, error) {
+	if quota < 0 {
+		return 0, errors.New("quota 不能为负数！")
+	}
+	return deltaUserQuotaAndGet(id, -quota)
+}
+
 func decreaseUserQuota(id int, quota int) (err error) {
 	result := DB.Model(&User{}).Where("id = ? AND quota >= ?", id, quota).Update("quota", gorm.Expr("quota - ?", quota))
 	if result.Error != nil {
@@ -1281,6 +1294,78 @@ func decreaseUserQuota(id int, quota int) (err error) {
 		return fmt.Errorf("insufficient quota to decrease: current quota is %s, attempted to decrease by %s", logger.FormatQuota(currentQuota), logger.FormatQuota(quota))
 	}
 	return nil
+}
+
+func OverrideUserQuotaAndGet(id int, quota int) (oldQuota int, newQuota int, err error) {
+	if quota < 0 {
+		return 0, 0, errors.New("quota 不能为负数！")
+	}
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).Select("id", "quota").Where("id = ?", id).First(&user).Error; err != nil {
+			return err
+		}
+		oldQuota = user.Quota
+		result := tx.Model(&User{}).Where("id = ?", id).Update("quota", quota)
+		if result.Error != nil {
+			return result.Error
+		}
+		if err := tx.Model(&User{}).Where("id = ?", id).Select("quota").First(&user).Error; err != nil {
+			return err
+		}
+		newQuota = user.Quota
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	invalidateUserQuotaCacheAfterMutation(id)
+	return oldQuota, newQuota, nil
+}
+
+func deltaUserQuotaAndGet(id int, delta int) (int, error) {
+	var newQuota int
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		query := tx.Model(&User{}).Where("id = ?", id)
+		if delta < 0 {
+			query = query.Where("quota >= ?", -delta)
+		}
+		result := query.Update("quota", gorm.Expr("quota + ?", delta))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			var user User
+			if err := tx.Select("id", "quota").Where("id = ?", id).First(&user).Error; err != nil {
+				return err
+			}
+			if delta >= 0 {
+				newQuota = user.Quota
+				return nil
+			}
+			return fmt.Errorf("insufficient quota to decrease: current quota is %s, attempted to decrease by %s", logger.FormatQuota(user.Quota), logger.FormatQuota(-delta))
+		}
+		var user User
+		if err := tx.Select("id", "quota").Where("id = ?", id).First(&user).Error; err != nil {
+			return err
+		}
+		newQuota = user.Quota
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	invalidateUserQuotaCacheAfterMutation(id)
+	return newQuota, nil
+}
+
+func invalidateUserQuotaCacheAfterMutation(id int) {
+	if !common.RedisEnabled {
+		return
+	}
+	if err := invalidateUserCache(id); err != nil {
+		common.SysLog("failed to invalidate user cache after quota mutation: " + err.Error())
+	}
 }
 
 func DeltaUpdateUserQuota(id int, delta int) (err error) {

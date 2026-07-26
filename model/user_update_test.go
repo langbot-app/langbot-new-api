@@ -27,7 +27,7 @@ func setupUserUpdateTestState(t *testing.T) {
 	})
 }
 
-func TestUserEditUpdatesExplicitQuotaWithoutOverwritingUsageCounters(t *testing.T) {
+func TestUserEditDoesNotOverwriteAccountingFields(t *testing.T) {
 	setupUserUpdateTestState(t)
 
 	user := User{
@@ -44,11 +44,47 @@ func TestUserEditUpdatesExplicitQuotaWithoutOverwritingUsageCounters(t *testing.
 	require.NoError(t, DB.Create(&user).Error)
 
 	user.Quota = 250000
+	user.UsedQuota = 999
+	user.RequestCount = 777
 	require.NoError(t, user.Edit(false))
 
 	var got User
 	require.NoError(t, DB.First(&got, user.Id).Error)
-	assert.Equal(t, 250000, got.Quota)
+	assert.Equal(t, 1000, got.Quota)
+	assert.Equal(t, 20, got.UsedQuota)
+	assert.Equal(t, 3, got.RequestCount)
+}
+
+func TestUserEditWithTxDoesNotOverwriteAccountingFields(t *testing.T) {
+	setupUserUpdateTestState(t)
+
+	user := User{
+		Id:           4,
+		Username:     "tx-managed-quota-user",
+		Password:     "password",
+		DisplayName:  "before",
+		Status:       common.UserStatusEnabled,
+		Quota:        1000,
+		UsedQuota:    20,
+		RequestCount: 3,
+		Group:        "default",
+	}
+	require.NoError(t, DB.Create(&user).Error)
+
+	staleUser, err := GetUserById(user.Id, true)
+	require.NoError(t, err)
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		staleUser.DisplayName = "after"
+		staleUser.Quota = 250000
+		staleUser.UsedQuota = 999
+		staleUser.RequestCount = 777
+		return staleUser.EditWithTx(tx, false)
+	}))
+
+	var got User
+	require.NoError(t, DB.First(&got, user.Id).Error)
+	assert.Equal(t, "after", got.DisplayName)
+	assert.Equal(t, 1000, got.Quota)
 	assert.Equal(t, 20, got.UsedQuota)
 	assert.Equal(t, 3, got.RequestCount)
 }
