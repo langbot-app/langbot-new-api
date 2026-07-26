@@ -86,6 +86,9 @@ const (
 	MsgUserRequire2FA                = "user.require_2fa"
 	MsgUserEmailVerificationRequired = "user.email_verification_required"
 	MsgUserVerificationCodeError     = "user.verification_code_error"
+	MsgUserEmailAlreadyTaken         = "user.email_already_taken"
+	MsgUserPasswordUnset             = "user.password_unset"
+	MsgUserPasswordResetLinkInvalid  = "user.password_reset_link_invalid"
 	MsgUserInputInvalid              = "user.input_invalid"
 	MsgUserNoPermissionSameLevel     = "user.no_permission_same_level"
 	MsgUserNoPermissionHigherLevel   = "user.no_permission_higher_level"
@@ -142,16 +145,17 @@ const (
 
 // Payment related messages
 const (
-	MsgPaymentNotConfigured    = "payment.not_configured"
-	MsgPaymentMethodNotExists  = "payment.method_not_exists"
-	MsgPaymentCallbackError    = "payment.callback_error"
-	MsgPaymentCreateFailed     = "payment.create_failed"
-	MsgPaymentStartFailed      = "payment.start_failed"
-	MsgPaymentAmountTooLow     = "payment.amount_too_low"
-	MsgPaymentStripeNotConfig  = "payment.stripe_not_configured"
-	MsgPaymentWebhookNotConfig = "payment.webhook_not_configured"
-	MsgPaymentPriceIdNotConfig = "payment.price_id_not_configured"
-	MsgPaymentCreemNotConfig   = "payment.creem_not_configured"
+	MsgPaymentNotConfigured      = "payment.not_configured"
+	MsgPaymentMethodNotExists    = "payment.method_not_exists"
+	MsgPaymentCallbackError      = "payment.callback_error"
+	MsgPaymentCreateFailed       = "payment.create_failed"
+	MsgPaymentStartFailed        = "payment.start_failed"
+	MsgPaymentAmountTooLow       = "payment.amount_too_low"
+	MsgPaymentStripeNotConfig    = "payment.stripe_not_configured"
+	MsgPaymentWebhookNotConfig   = "payment.webhook_not_configured"
+	MsgPaymentPriceIdNotConfig   = "payment.price_id_not_configured"
+	MsgPaymentCreemNotConfig     = "payment.creem_not_configured"
+	MsgPaymentComplianceRequired = "payment.compliance_required"
 )
 
 // Topup related messages

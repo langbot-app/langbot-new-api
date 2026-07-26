@@ -1,6 +1,7 @@
 package common
 
 import (
+	"crypto/tls"
 	//"os"
 	//"strconv"
 	"sync"
@@ -33,12 +34,30 @@ var DefaultCollapseSidebar = false // default value of collapse sidebar
 
 var SessionSecret = uuid.New().String()
 var CryptoSecret = uuid.New().String()
+var SessionCookieSecure = false
+var SessionCookieTrustedURLs []string
+
+const (
+	DefaultUserSessionActiveLimit           = 50
+	DefaultUserSessionIssuanceLimit         = 100
+	DefaultUserSessionIssuanceWindowSeconds = 24 * 60 * 60
+	DefaultUserSessionRevokedRetentionDays  = 7
+	DefaultUserSessionHourlyAlertThreshold  = 5000
+)
+
+var (
+	UserSessionActiveLimit           = DefaultUserSessionActiveLimit
+	UserSessionIssuanceLimit         = DefaultUserSessionIssuanceLimit
+	UserSessionIssuanceWindowSeconds = int64(DefaultUserSessionIssuanceWindowSeconds)
+	UserSessionRevokedRetentionDays  = DefaultUserSessionRevokedRetentionDays
+	UserSessionHourlyAlertThreshold  = DefaultUserSessionHourlyAlertThreshold
+)
 
 var OptionMap map[string]string
 var OptionMapRWMutex sync.RWMutex
 
 var ItemsPerPage = 10
-var MaxRecentItems = 100
+var MaxRecentItems = 1000
 
 var PasswordLoginEnabled = true
 var PasswordRegisterEnabled = true
@@ -73,9 +92,15 @@ var MemoryCacheEnabled bool
 
 var LogConsumeEnabled = true
 
+var TLSInsecureSkipVerify bool
+var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
+
 var SMTPServer = ""
 var SMTPPort = 587
 var SMTPSSLEnabled = false
+var SMTPStartTLSEnabled = false
+var SMTPInsecureSkipVerify = false
+var SMTPForceAuthLogin = false
 var SMTPAccount = ""
 var SMTPFrom = ""
 var SMTPToken = ""
@@ -111,6 +136,21 @@ var RetryTimes = 0
 
 var IsMasterNode bool
 
+const (
+	NodeNameSourceManual   = "manual"
+	NodeNameSourceHostname = "hostname"
+)
+
+// NodeName 节点名称，优先从 NODE_NAME 环境变量读取，未配置时回退主机名。
+// 用于审计日志和后台任务中标识节点身份；多实例部署时建议显式配置稳定 NODE_NAME。
+var NodeName = ""
+
+// NodeNameSource records how NodeName was chosen so future instance-management
+// reporting can distinguish operator-configured names from automatic fallback.
+var NodeNameSource = NodeNameSourceHostname
+
+var NodeNameManuallyConfigured bool
+
 var requestInterval int
 var RequestInterval time.Duration
 
@@ -121,6 +161,7 @@ var BatchUpdateInterval int
 
 var RelayTimeout int // unit is second
 
+var RelayIdleConnTimeout int // unit is second
 var RelayMaxIdleConns int
 var RelayMaxIdleConnsPerHost int
 
@@ -130,7 +171,8 @@ var GeminiSafetySetting string
 var CohereSafetySetting string
 
 const (
-	RequestIdKey = "X-Oneapi-Request-Id"
+	RequestIdKey         = "X-Oneapi-Request-Id"
+	UpstreamRequestIdKey = "X-Upstream-Request-Id"
 )
 
 const (
@@ -171,6 +213,11 @@ var (
 
 	DownloadRateLimitNum            = 10
 	DownloadRateLimitDuration int64 = 60
+
+	// Per-user search rate limit (applies after authentication, keyed by user ID)
+	SearchRateLimitEnable         = true
+	SearchRateLimitNum            = 10
+	SearchRateLimitDuration int64 = 60
 )
 
 var RateLimitKeyExpirationDuration = 20 * time.Minute
@@ -203,5 +250,6 @@ const (
 const (
 	TopUpStatusPending = "pending"
 	TopUpStatusSuccess = "success"
+	TopUpStatusFailed  = "failed"
 	TopUpStatusExpired = "expired"
 )

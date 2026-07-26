@@ -2,7 +2,9 @@ package common
 
 import (
 	crand "crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -15,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -192,7 +195,7 @@ func Interface2String(inter interface{}) string {
 	case int:
 		return fmt.Sprintf("%d", inter.(int))
 	case float64:
-		return fmt.Sprintf("%f", inter.(float64))
+		return strconv.FormatFloat(inter.(float64), 'f', -1, 64)
 	case bool:
 		if inter.(bool) {
 			return "true"
@@ -215,11 +218,6 @@ func IntMax(a int, b int) int {
 	} else {
 		return b
 	}
-}
-
-func IsIP(s string) bool {
-	ip := net.ParseIP(s)
-	return ip != nil
 }
 
 func GetUUID() string {
@@ -268,8 +266,20 @@ func GetTimestamp() int64 {
 }
 
 func GetTimeString() string {
-	now := time.Now()
-	return fmt.Sprintf("%s%d", now.Format("20060102150405"), now.UnixNano()%1e9)
+	now := time.Now().UTC()
+	return fmt.Sprintf("%s%09d", now.Format("20060102150405"), now.UnixNano()%1e9)
+}
+
+var requestIdPrefix = func() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Path != "" {
+		h := sha256.Sum256([]byte(bi.Main.Path))
+		return hex.EncodeToString(h[:4])
+	}
+	return GetRandomString(8)
+}()
+
+func NewRequestId() string {
+	return GetTimeString() + requestIdPrefix + GetRandomString(8)
 }
 
 func Max(a int, b int) int {

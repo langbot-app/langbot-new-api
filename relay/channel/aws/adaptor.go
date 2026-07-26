@@ -49,12 +49,14 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 			for i2, mediaMessage := range content {
 				if mediaMessage.Source != nil {
 					if mediaMessage.Source.Type == "url" {
-						fileData, err := service.GetFileBase64FromUrl(c, mediaMessage.Source.Url, "formatting image for Claude")
+						// 使用统一的文件服务获取图片数据
+						source := types.NewURLFileSource(mediaMessage.Source.Url)
+						base64Data, mimeType, err := service.GetBase64Data(c, source, "formatting image for Claude")
 						if err != nil {
 							return nil, fmt.Errorf("get file base64 from url failed: %s", err.Error())
 						}
-						mediaMessage.Source.MediaType = fileData.MimeType
-						mediaMessage.Source.Data = fileData.Base64Data
+						mediaMessage.Source.MediaType = mimeType
+						mediaMessage.Source.Data = base64Data
 						mediaMessage.Source.Url = ""
 						mediaMessage.Source.Type = "base64"
 						content[i2] = mediaMessage
@@ -121,9 +123,13 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	}
 
 	// 原有的Claude模型处理逻辑
-	claudeReq, err := claude.RequestOpenAI2ClaudeMessage(c, *request)
+	result, err := service.ConvertRequest(c, info, types.RelayFormatClaude, request)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to convert openai request to claude request")
+	}
+	claudeReq, ok := result.Value.(*dto.ClaudeRequest)
+	if !ok {
+		return nil, fmt.Errorf("expected Anthropic Messages request, got %T", result.Value)
 	}
 	info.UpstreamModelName = claudeReq.Model
 	return claudeReq, err

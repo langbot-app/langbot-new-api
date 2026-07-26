@@ -1,0 +1,112 @@
+name: Publish Docker image (production)
+
+on:
+  push:
+    branches:
+      - deploy/prod
+  workflow_dispatch:
+
+concurrency:
+  group: new-api-production-image
+  cancel-in-progress: false
+
+jobs:
+  build_single_arch:
+    name: Build & push production (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: write
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Check out production branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+
+      - name: Determine immutable production version
+        id: version
+        run: |
+          VERSION="prod-$(date -u +'%Y%m%d')-$(git rev-parse --short HEAD)"
+          echo "$VERSION" > VERSION
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize GHCR repository
+        run: echo "GHCR_REPOSITORY=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image labels
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ env.GHCR_REPOSITORY }}
+
+      - name: Build and push production image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ghcr.io/${{ env.GHCR_REPOSITORY }}:prod-${{ matrix.arch }}
+            ghcr.io/${{ env.GHCR_REPOSITORY }}:${{ steps.version.outputs.value }}-${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=prod-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=prod-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+
+  create_manifest:
+    name: Create production multi-arch manifest
+    needs: build_single_arch
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Normalize GHCR repository
+        run: echo "GHCR_REPOSITORY=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create immutable production manifest
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${GHCR_REPOSITORY}:${{ needs.build_single_arch.outputs.version }} \
+            ghcr.io/${GHCR_REPOSITORY}:${{ needs.build_single_arch.outputs.version }}-amd64 \
+            ghcr.io/${GHCR_REPOSITORY}:${{ needs.build_single_arch.outputs.version }}-arm64
+
+      - name: Create production manifest
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${GHCR_REPOSITORY}:prod \
+            ghcr.io/${GHCR_REPOSITORY}:prod-amd64 \
+            ghcr.io/${GHCR_REPOSITORY}:prod-arm64
+
+      - name: Verify published manifest
+        run: docker buildx imagetools inspect ghcr.io/${GHCR_REPOSITORY}:prod

@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,12 +38,12 @@ func MidjourneyErrorWithStatusCodeWrapper(code int, desc string, statusCode int)
 //	if !strings.HasPrefix(lowerText, "get file base64 from url") && !strings.HasPrefix(lowerText, "mime type is not supported") {
 //		if strings.Contains(lowerText, "post") || strings.Contains(lowerText, "dial") || strings.Contains(lowerText, "http") {
 //			common.SysLog(fmt.Sprintf("error: %s", text))
-//			text = "failed to request upstream service"
+//			text = "请求上游地址失败"
 //		}
 //	}
 //	openAIError := dto.OpenAIError{
 //		Message: text,
-//		Type:    "model_service_error",
+//		Type:    "new_api_error",
 //		Code:    code,
 //	}
 //	return &dto.OpenAIErrorWithStatusCode{
@@ -62,12 +64,12 @@ func ClaudeErrorWrapper(err error, code string, statusCode int) *dto.ClaudeError
 	if !strings.HasPrefix(lowerText, "get file base64 from url") {
 		if strings.Contains(lowerText, "post") || strings.Contains(lowerText, "dial") || strings.Contains(lowerText, "http") {
 			common.SysLog(fmt.Sprintf("error: %s", text))
-			text = "failed to request upstream service"
+			text = "请求上游地址失败"
 		}
 	}
 	claudeError := types.ClaudeError{
 		Message: text,
-		Type:    "model_service_error",
+		Type:    "new_api_error",
 	}
 	return &dto.ClaudeErrorWithStatusCode{
 		Error:      claudeError,
@@ -90,33 +92,58 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 	}
 	CloseResponseBodyGracefully(resp)
 	var errResponse dto.GeneralErrorResponse
+	responseBodyText := string(responseBody)
+	responseBodyPreview := common.LocalLogPreview(responseBodyText)
+	buildErrWithBody := func(message string) error {
+		if message == "" {
+			return fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, responseBodyText)
+		}
+		return fmt.Errorf("bad response status code %d, message: %s, body: %s", resp.StatusCode, message, responseBodyText)
+	}
 
 	err = common.Unmarshal(responseBody, &errResponse)
 	if err != nil {
 		if showBodyWhenFail {
-			newApiErr.Err = fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, string(responseBody))
+			newApiErr.Err = buildErrWithBody("")
 		} else {
-			if common.DebugEnabled {
-				logger.LogInfo(ctx, fmt.Sprintf("bad response status code %d, body: %s", resp.StatusCode, string(responseBody)))
-			}
+			logger.LogError(ctx, fmt.Sprintf("bad response status code %d, body: %s", resp.StatusCode, responseBodyPreview))
 			newApiErr.Err = fmt.Errorf("bad response status code %d", resp.StatusCode)
 		}
 		return
 	}
-	if errResponse.Error.Message != "" {
+
+	if common.GetJsonType(errResponse.Error) == "object" {
 		// General format error (OpenAI, Anthropic, Gemini, etc.)
-		newApiErr = types.WithOpenAIError(errResponse.Error, resp.StatusCode)
-	} else {
-		newApiErr = types.NewOpenAIError(errors.New(errResponse.ToMessage()), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+		oaiError := errResponse.TryToOpenAIError()
+		if oaiError != nil {
+			newApiErr = types.WithOpenAIError(*oaiError, resp.StatusCode)
+			if showBodyWhenFail {
+				newApiErr.Err = buildErrWithBody(newApiErr.Error())
+			}
+			return
+		}
+	}
+	message := errResponse.ToMessage()
+	if message == "" {
+		// The body parsed as JSON but carried no usable error message; log the
+		// raw body so the upstream failure remains diagnosable.
+		logger.LogError(ctx, fmt.Sprintf("bad response status code %d with empty error message, body: %s", resp.StatusCode, responseBodyPreview))
+	}
+	newApiErr = types.NewOpenAIError(errors.New(message), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+	if showBodyWhenFail {
+		newApiErr.Err = buildErrWithBody(newApiErr.Error())
 	}
 	return
 }
 
 func ResetStatusCode(newApiErr *types.NewAPIError, statusCodeMappingStr string) {
+	if newApiErr == nil {
+		return
+	}
 	if statusCodeMappingStr == "" || statusCodeMappingStr == "{}" {
 		return
 	}
-	statusCodeMapping := make(map[string]string)
+	statusCodeMapping := make(map[string]any)
 	err := common.Unmarshal([]byte(statusCodeMappingStr), &statusCodeMapping)
 	if err != nil {
 		return
@@ -125,9 +152,41 @@ func ResetStatusCode(newApiErr *types.NewAPIError, statusCodeMappingStr string) 
 		return
 	}
 	codeStr := strconv.Itoa(newApiErr.StatusCode)
-	if _, ok := statusCodeMapping[codeStr]; ok {
-		intCode, _ := strconv.Atoi(statusCodeMapping[codeStr])
+	if value, ok := statusCodeMapping[codeStr]; ok {
+		intCode, ok := parseStatusCodeMappingValue(value)
+		if !ok {
+			return
+		}
 		newApiErr.StatusCode = intCode
+	}
+}
+
+func parseStatusCodeMappingValue(value any) (int, bool) {
+	switch v := value.(type) {
+	case string:
+		if v == "" {
+			return 0, false
+		}
+		statusCode, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, false
+		}
+		return statusCode, true
+	case float64:
+		if v != math.Trunc(v) {
+			return 0, false
+		}
+		return int(v), true
+	case int:
+		return v, true
+	case json.Number:
+		statusCode, err := strconv.Atoi(v.String())
+		if err != nil {
+			return 0, false
+		}
+		return statusCode, true
+	default:
+		return 0, false
 	}
 }
 
@@ -142,10 +201,10 @@ func TaskErrorWrapper(err error, code string, statusCode int) *dto.TaskError {
 	lowerText := strings.ToLower(text)
 	if strings.Contains(lowerText, "post") || strings.Contains(lowerText, "dial") || strings.Contains(lowerText, "http") {
 		common.SysLog(fmt.Sprintf("error: %s", text))
-		//text = "failed to request upstream service"
+		//text = "请求上游地址失败"
 		text = common.MaskSensitiveInfo(text)
 	}
-	// Avoid exposing internal errors
+	//避免暴露内部错误
 	taskError := &dto.TaskError{
 		Code:       code,
 		Message:    text,
@@ -154,4 +213,17 @@ func TaskErrorWrapper(err error, code string, statusCode int) *dto.TaskError {
 	}
 
 	return taskError
+}
+
+// TaskErrorFromAPIError 将 PreConsumeBilling 返回的 NewAPIError 转换为 TaskError。
+func TaskErrorFromAPIError(apiErr *types.NewAPIError) *dto.TaskError {
+	if apiErr == nil {
+		return nil
+	}
+	return &dto.TaskError{
+		Code:       string(apiErr.GetErrorCode()),
+		Message:    apiErr.Err.Error(),
+		StatusCode: apiErr.StatusCode,
+		Error:      apiErr.Err,
+	}
 }

@@ -54,6 +54,8 @@ const (
 	ChannelTypeDoubaoVideo    = 54
 	ChannelTypeSora           = 55
 	ChannelTypeReplicate      = 56
+	ChannelTypeCodex          = 57
+	ChannelTypeAdvancedCustom = 58
 	ChannelTypeDummy          // this one is only for count, do not add any channel after this
 
 )
@@ -116,6 +118,8 @@ var ChannelBaseURLs = []string{
 	"https://ark.cn-beijing.volces.com",         //54
 	"https://api.openai.com",                    //55
 	"https://api.replicate.com",                 //56
+	"https://chatgpt.com",                       //57
+	"",                                          //58
 }
 
 var ChannelTypeNames = map[int]string{
@@ -172,6 +176,8 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeDoubaoVideo:    "DoubaoVideo",
 	ChannelTypeSora:           "Sora",
 	ChannelTypeReplicate:      "Replicate",
+	ChannelTypeCodex:          "ChatGPT Subscription (Codex)",
+	ChannelTypeAdvancedCustom: "Advanced Custom",
 }
 
 func GetChannelTypeName(channelType int) string {

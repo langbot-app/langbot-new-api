@@ -11,10 +11,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// MaxImageN caps the image generation count. Without this bound a huge or
+// wrapped-negative n overflows quota calculation into a negative charge.
+const MaxImageN = 128
+
 type ImageRequest struct {
 	Model             string          `json:"model"`
 	Prompt            string          `json:"prompt" binding:"required"`
-	N                 uint            `json:"n,omitempty"`
+	N                 *uint           `json:"n,omitempty"`
 	Size              string          `json:"size,omitempty"`
 	Quality           string          `json:"quality,omitempty"`
 	ResponseFormat    string          `json:"response_format,omitempty"`
@@ -26,9 +30,15 @@ type ImageRequest struct {
 	OutputFormat      json.RawMessage `json:"output_format,omitempty"`
 	OutputCompression json.RawMessage `json:"output_compression,omitempty"`
 	PartialImages     json.RawMessage `json:"partial_images,omitempty"`
-	// Stream            bool            `json:"stream,omitempty"`
-	Watermark *bool           `json:"watermark,omitempty"`
-	Image     json.RawMessage `json:"image,omitempty"`
+	Stream            *bool           `json:"stream,omitempty"`
+	Images            json.RawMessage `json:"images,omitempty"`
+	Mask              json.RawMessage `json:"mask,omitempty"`
+	InputFidelity     json.RawMessage `json:"input_fidelity,omitempty"`
+	Watermark         *bool           `json:"watermark,omitempty"`
+	// zhipu 4v
+	WatermarkEnabled json.RawMessage `json:"watermark_enabled,omitempty"`
+	UserId           json.RawMessage `json:"user_id,omitempty"`
+	Image            json.RawMessage `json:"image,omitempty"`
 	// 用匿名参数接收额外参数
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -145,16 +155,24 @@ func (i *ImageRequest) GetTokenCountMeta() *types.TokenCountMeta {
 		}
 	}
 
-	// not support token count for dalle
+	imageN := uint(1)
+	if i.N != nil && *i.N > 0 {
+		imageN = *i.N
+	}
+
+	// Keep n separate from ImagePriceRatio so size/quality and count remain
+	// independent billing dimensions. Fixed-price pre-consume stores this on
+	// PriceData, and image settlement reuses or replaces the same "n" ratio.
 	return &types.TokenCountMeta{
 		CombineText:     i.Prompt,
 		MaxTokens:       1584,
-		ImagePriceRatio: sizeRatio * qualityRatio * float64(i.N),
+		ImagePriceRatio: sizeRatio * qualityRatio,
+		BillingRatios:   map[string]float64{"n": float64(imageN)},
 	}
 }
 
 func (i *ImageRequest) IsStream(c *gin.Context) bool {
-	return false
+	return i.Stream != nil && *i.Stream
 }
 
 func (i *ImageRequest) SetModelName(modelName string) {
@@ -164,9 +182,9 @@ func (i *ImageRequest) SetModelName(modelName string) {
 }
 
 type ImageResponse struct {
-	Data    []ImageData `json:"data"`
-	Created int64       `json:"created"`
-	Extra   any         `json:"extra,omitempty"`
+	Data     []ImageData     `json:"data"`
+	Created  int64           `json:"created"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 type ImageData struct {
 	Url           string `json:"url"`
