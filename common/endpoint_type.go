@@ -8,6 +8,8 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 	switch channelType {
 	case constant.ChannelTypeJina:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeJinaRerank}
+	case constant.ChannelTypeCohere:
+		endpointTypes = []constant.EndpointType{constant.EndpointTypeCohereRerank}
 	//case constant.ChannelTypeMidjourney, constant.ChannelTypeMidjourneyPlus:
 	//	endpointTypes = []constant.EndpointType{constant.EndpointTypeMidjourney}
 	//case constant.ChannelTypeSunoAPI:

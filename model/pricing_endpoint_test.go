@@ -228,6 +228,44 @@ func TestPricingIncludesLangBotModelMetadata(t *testing.T) {
 	assert.Equal(t, []string{"vision", "function_call"}, pricing.LLMAbilities)
 }
 
+func TestPricingIncludesLangBotRerankContract(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+
+	insertPricingEndpointChannel(t, 206, constant.ChannelTypeOpenAI, dto.ChannelOtherSettings{})
+	modelNames := []string{
+		"rerank-multilingual-v3.0",
+		"rerank-english-v3.0",
+		"rerank-v4.0-pro",
+	}
+	for _, modelName := range modelNames {
+		insertPricingEndpointAbility(t, 206, modelName)
+	}
+
+	pricingByName := make(map[string]Pricing)
+	for _, pricing := range GetPricing() {
+		pricingByName[pricing.ModelName] = pricing
+	}
+
+	for _, modelName := range modelNames {
+		pricing, ok := pricingByName[modelName]
+		require.True(t, ok, modelName)
+		assert.Equal(t, builtinPricingModelCatalog[modelName].UUID, pricing.UUID, modelName)
+		assert.NotZero(t, pricing.VendorID, modelName)
+		assert.Equal(t, "rerank", pricing.Category, modelName)
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeCohereRerank}, pricing.SupportedEndpointTypes, modelName)
+		assert.Equal(t, 0, pricing.QuotaType, modelName)
+		assert.Equal(t, 37.5, pricing.ModelRatio, modelName)
+	}
+
+	vendorByID := make(map[int]PricingVendor)
+	for _, vendor := range GetVendors() {
+		vendorByID[vendor.ID] = vendor
+	}
+	assert.Equal(t, "Cohere", vendorByID[pricingByName[modelNames[0]].VendorID].Name)
+	assert.Equal(t, "Cohere.Color", vendorByID[pricingByName[modelNames[0]].VendorID].Icon)
+	assert.Equal(t, common.EndpointInfo{Path: "/v1/rerank", Method: "POST"}, GetSupportedEndpointMap()[string(constant.EndpointTypeCohereRerank)])
+}
+
 func TestInitChannelCacheInvalidatesPricingCache(t *testing.T) {
 	resetPricingEndpointTestTables(t)
 

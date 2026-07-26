@@ -239,9 +239,14 @@ var defaultModelRatio = map[string]float64{
 	"command-r-plus":         1.5,
 	"command-r-08-2024":      0.075,
 	"command-r-plus-08-2024": 1.25,
-	"deepseek-chat":          0.27 / 2,
-	"deepseek-coder":         0.27 / 2,
-	"deepseek-reasoner":      0.55 / 2, // 0.55 / 1k tokens
+	// Cohere rerank models are billed from request input tokens. Keep them on
+	// ratio-based billing so /api/pricing exposes the contract LangBot Space consumes.
+	"rerank-multilingual-v3.0": 0.5,
+	"rerank-english-v3.0":      0.5,
+	"rerank-v4.0-pro":          0.5,
+	"deepseek-chat":            0.27 / 2,
+	"deepseek-coder":           0.27 / 2,
+	"deepseek-reasoner":        0.55 / 2, // 0.55 / 1k tokens
 	// Perplexity online 模型对搜索额外收费，有需要应自行调整，此处不计入搜索费用
 	"llama-3-sonar-small-32k-chat":   0.2 / 1000 * USD,
 	"llama-3-sonar-small-32k-online": 0.2 / 1000 * USD,

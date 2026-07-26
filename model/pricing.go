@@ -312,6 +312,9 @@ func updatePricing() {
 
 	modelSupportEndpointTypes = make(map[string][]constant.EndpointType)
 	for model, endpoints := range modelSupportEndpointsStr {
+		if builtin, ok := builtinPricingModelCatalog[model]; ok {
+			endpoints = []string{builtin.Endpoint}
+		}
 		supportedEndpoints := make([]constant.EndpointType, 0)
 		for _, endpointStr := range endpoints {
 			endpointType := constant.EndpointType(endpointStr)

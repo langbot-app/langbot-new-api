@@ -4,6 +4,37 @@ import (
 	"strings"
 )
 
+type builtinPricingModelMetadata struct {
+	UUID     string
+	Vendor   string
+	Category string
+	Endpoint string
+}
+
+// builtinPricingModelCatalog contains metadata required by downstream catalog
+// consumers for models that can be enabled through a channel before an
+// operator creates a models-table record. UUIDs are stable public identities.
+var builtinPricingModelCatalog = map[string]builtinPricingModelMetadata{
+	"rerank-multilingual-v3.0": {
+		UUID:     "f3ae9537-c717-5f62-a86d-01258e231a12",
+		Vendor:   "Cohere",
+		Category: "rerank",
+		Endpoint: "cohere-rerank",
+	},
+	"rerank-english-v3.0": {
+		UUID:     "3927cfe2-2d91-55e1-820c-37fd888cee0d",
+		Vendor:   "Cohere",
+		Category: "rerank",
+		Endpoint: "cohere-rerank",
+	},
+	"rerank-v4.0-pro": {
+		UUID:     "95ac8295-8af6-514e-acf4-408f838eea73",
+		Vendor:   "Cohere",
+		Category: "rerank",
+		Endpoint: "cohere-rerank",
+	},
+}
+
 // 简化的供应商映射规则
 var defaultVendorRules = map[string]string{
 	"gpt":      "OpenAI",
@@ -73,6 +104,19 @@ func initDefaultVendorMapping(metaMap map[string]*Model, vendorMap map[int]*Vend
 	for _, ability := range enableAbilities {
 		modelName := ability.Model
 		if _, exists := metaMap[modelName]; exists {
+			continue
+		}
+
+		if builtin, ok := builtinPricingModelCatalog[modelName]; ok {
+			metaMap[modelName] = &Model{
+				UUID:      builtin.UUID,
+				ModelName: modelName,
+				VendorID:  getOrCreateVendor(builtin.Vendor, vendorMap),
+				Endpoints: `{"` + builtin.Endpoint + `":"/v1/rerank"}`,
+				Status:    1,
+				Category:  builtin.Category,
+				NameRule:  NameRuleExact,
+			}
 			continue
 		}
 
