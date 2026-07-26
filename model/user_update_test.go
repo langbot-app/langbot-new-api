@@ -27,6 +27,32 @@ func setupUserUpdateTestState(t *testing.T) {
 	})
 }
 
+func TestUserEditUpdatesExplicitQuotaWithoutOverwritingUsageCounters(t *testing.T) {
+	setupUserUpdateTestState(t)
+
+	user := User{
+		Id:           3,
+		Username:     "space-managed-quota-user",
+		Password:     "password",
+		DisplayName:  "before",
+		Status:       common.UserStatusEnabled,
+		Quota:        1000,
+		UsedQuota:    20,
+		RequestCount: 3,
+		Group:        "default",
+	}
+	require.NoError(t, DB.Create(&user).Error)
+
+	user.Quota = 250000
+	require.NoError(t, user.Edit(false))
+
+	var got User
+	require.NoError(t, DB.First(&got, user.Id).Error)
+	assert.Equal(t, 250000, got.Quota)
+	assert.Equal(t, 20, got.UsedQuota)
+	assert.Equal(t, 3, got.RequestCount)
+}
+
 func TestUserUpdateDoesNotOverwriteAccountingFields(t *testing.T) {
 	setupUserUpdateTestState(t)
 
