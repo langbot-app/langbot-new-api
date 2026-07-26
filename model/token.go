@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
-
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
 )
@@ -14,7 +14,7 @@ import (
 type Token struct {
 	Id                 int            `json:"id"`
 	UserId             int            `json:"user_id" gorm:"index"`
-	Key                string         `json:"key" gorm:"type:char(48);uniqueIndex"`
+	Key                string         `json:"key" gorm:"type:varchar(128);uniqueIndex"`
 	Status             int            `json:"status" gorm:"default:1"`
 	Name               string         `json:"name" gorm:"index" `
 	CreatedTime        int64          `json:"created_time" gorm:"bigint"`
@@ -23,10 +23,11 @@ type Token struct {
 	RemainQuota        int            `json:"remain_quota" gorm:"default:0"`
 	UnlimitedQuota     bool           `json:"unlimited_quota"`
 	ModelLimitsEnabled bool           `json:"model_limits_enabled"`
-	ModelLimits        string         `json:"model_limits" gorm:"type:varchar(1024);default:''"`
+	ModelLimits        string         `json:"model_limits" gorm:"type:text"`
 	AllowIps           *string        `json:"allow_ips" gorm:"default:''"`
 	UsedQuota          int            `json:"used_quota" gorm:"default:0"` // used quota
 	Group              string         `json:"group" gorm:"default:''"`
+	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 }
 
@@ -34,26 +35,47 @@ func (token *Token) Clean() {
 	token.Key = ""
 }
 
-func (token *Token) GetIpLimitsMap() map[string]any {
+func MaskTokenKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	if len(key) <= 4 {
+		return strings.Repeat("*", len(key))
+	}
+	if len(key) <= 8 {
+		return key[:2] + "****" + key[len(key)-2:]
+	}
+	return key[:4] + "**********" + key[len(key)-4:]
+}
+
+func (token *Token) GetFullKey() string {
+	return token.Key
+}
+
+func (token *Token) GetMaskedKey() string {
+	return MaskTokenKey(token.Key)
+}
+
+func (token *Token) GetIpLimits() []string {
 	// delete empty spaces
 	//split with \n
-	ipLimitsMap := make(map[string]any)
+	ipLimits := make([]string, 0)
 	if token.AllowIps == nil {
-		return ipLimitsMap
+		return ipLimits
 	}
 	cleanIps := strings.ReplaceAll(*token.AllowIps, " ", "")
 	if cleanIps == "" {
-		return ipLimitsMap
+		return ipLimits
 	}
 	ips := strings.Split(cleanIps, "\n")
 	for _, ip := range ips {
 		ip = strings.TrimSpace(ip)
 		ip = strings.ReplaceAll(ip, ",", "")
-		if common.IsIP(ip) {
-			ipLimitsMap[ip] = true
+		if ip != "" {
+			ipLimits = append(ipLimits, ip)
 		}
 	}
-	return ipLimitsMap
+	return ipLimits
 }
 
 func GetAllUserTokens(userId int, startIdx int, num int) ([]*Token, error) {
@@ -63,29 +85,123 @@ func GetAllUserTokens(userId int, startIdx int, num int) ([]*Token, error) {
 	return tokens, err
 }
 
-func SearchUserTokens(userId int, keyword string, token string) (tokens []*Token, err error) {
-	if token != "" {
-		token = strings.Trim(token, "sk-")
+// sanitizeLikePattern 校验并清洗用户输入的 LIKE 搜索模式。
+// 规则：
+//  1. 转义 ! 和 _（使用 ! 作为 ESCAPE 字符，兼容 MySQL/PostgreSQL/SQLite）
+//  2. 连续的 % 合并为单个 %
+//  3. 最多允许 2 个 %
+//  4. 含 % 时（模糊搜索），去掉 % 后关键词长度必须 >= 2
+//  5. 不含 % 时按精确匹配
+func sanitizeLikePattern(input string) (string, error) {
+	// 1. 先转义 ESCAPE 字符 ! 自身，再转义 _
+	//    使用 ! 而非 \ 作为 ESCAPE 字符，避免 MySQL 中反斜杠的字符串转义问题
+	input = strings.ReplaceAll(input, "!", "!!")
+	input = strings.ReplaceAll(input, `_`, `!_`)
+
+	if err := validateLikePattern(input); err != nil {
+		return "", err
 	}
-	err = DB.Where("user_id = ?", userId).Where("name LIKE ?", "%"+keyword+"%").Where(commonKeyCol+" LIKE ?", "%"+token+"%").Find(&tokens).Error
-	return tokens, err
+
+	// 5. 无 % 时，精确全匹配
+	return input, nil
+}
+
+func validateLikePattern(input string) error {
+	// 1. 连续的 % 直接拒绝
+	if strings.Contains(input, "%%") {
+		return errors.New("搜索模式中不允许包含连续的 % 通配符")
+	}
+
+	// 2. 统计 % 数量，不得超过 2
+	count := strings.Count(input, "%")
+	if count > 2 {
+		return errors.New("搜索模式中最多允许包含 2 个 % 通配符")
+	}
+
+	// 3. 含 % 时，去掉 % 后关键词长度必须 >= 2
+	if count > 0 {
+		stripped := strings.ReplaceAll(input, "%", "")
+		if len(stripped) < 2 {
+			return errors.New("使用模糊搜索时，关键词长度至少为 2 个字符")
+		}
+	}
+
+	return nil
+}
+
+const searchHardLimit = 100
+
+func SearchUserTokens(userId int, keyword string, token string, offset int, limit int) (tokens []*Token, total int64, err error) {
+	// model 层强制截断
+	if limit <= 0 || limit > searchHardLimit {
+		limit = searchHardLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	if token != "" {
+		token = strings.TrimPrefix(token, "sk-")
+	}
+
+	// 超量用户（令牌数超过上限）只允许精确搜索，禁止模糊搜索
+	maxTokens := operation_setting.GetMaxUserTokens()
+	hasFuzzy := strings.Contains(keyword, "%") || strings.Contains(token, "%")
+	if hasFuzzy {
+		count, err := CountUserTokens(userId)
+		if err != nil {
+			common.SysLog("failed to count user tokens: " + err.Error())
+			return nil, 0, errors.New("获取令牌数量失败")
+		}
+		if int(count) > maxTokens {
+			return nil, 0, errors.New("令牌数量超过上限，仅允许精确搜索，请勿使用 % 通配符")
+		}
+	}
+
+	baseQuery := DB.Model(&Token{}).Where("user_id = ?", userId)
+
+	// 非空才加 LIKE 条件，空则跳过（不过滤该字段）
+	if keyword != "" {
+		keywordPattern, err := sanitizeLikePattern(keyword)
+		if err != nil {
+			return nil, 0, err
+		}
+		baseQuery = baseQuery.Where("name LIKE ? ESCAPE '!'", keywordPattern)
+	}
+	if token != "" {
+		tokenPattern, err := sanitizeLikePattern(token)
+		if err != nil {
+			return nil, 0, err
+		}
+		baseQuery = baseQuery.Where(commonKeyCol+" LIKE ? ESCAPE '!'", tokenPattern)
+	}
+
+	// 先查匹配总数（用于分页，受 maxTokens 上限保护，避免全表 COUNT）
+	err = baseQuery.Limit(maxTokens).Count(&total).Error
+	if err != nil {
+		common.SysError("failed to count search tokens: " + err.Error())
+		return nil, 0, errors.New("搜索令牌失败")
+	}
+
+	// 再分页查数据
+	err = baseQuery.Order("id desc").Offset(offset).Limit(limit).Find(&tokens).Error
+	if err != nil {
+		common.SysError("failed to search tokens: " + err.Error())
+		return nil, 0, errors.New("搜索令牌失败")
+	}
+	return tokens, total, nil
 }
 
 func ValidateUserToken(key string) (token *Token, err error) {
 	if key == "" {
-		return nil, errors.New("no valid api key provided or you should update to a new version")
+		return nil, ErrTokenNotProvided
 	}
 	token, err = GetTokenByKey(key, false)
 	if err == nil {
-		if token.Status == common.TokenStatusExhausted {
-			keyPrefix := key[:3]
-			keySuffix := key[len(key)-3:]
-			return token, errors.New("api key quota exhausted [sk-" + keyPrefix + "***" + keySuffix + "]")
-		} else if token.Status == common.TokenStatusExpired {
-			return token, errors.New("api key expired")
-		}
-		if token.Status != common.TokenStatusEnabled {
-			return token, errors.New("api key status not available")
+		if token.Status == common.TokenStatusExhausted ||
+			token.Status == common.TokenStatusExpired ||
+			token.Status != common.TokenStatusEnabled {
+			return token, ErrTokenInvalid
 		}
 		if token.ExpiredTime != -1 && token.ExpiredTime < common.GetTimestamp() {
 			if !common.RedisEnabled {
@@ -95,29 +211,30 @@ func ValidateUserToken(key string) (token *Token, err error) {
 					common.SysLog("failed to update token status" + err.Error())
 				}
 			}
-			return token, errors.New("api key expired")
+			return token, ErrTokenInvalid
 		}
 		if !token.UnlimitedQuota && token.RemainQuota <= 0 {
 			if !common.RedisEnabled {
-				// in this case, we can make sure the token is exhausted
 				token.Status = common.TokenStatusExhausted
 				err := token.SelectUpdate()
 				if err != nil {
 					common.SysLog("failed to update token status" + err.Error())
 				}
 			}
-			keyPrefix := key[:3]
-			keySuffix := key[len(key)-3:]
-			return token, errors.New(fmt.Sprintf("[sk-%s***%s] api key quota exhausted !token.UnlimitedQuota && token.RemainQuota = %d", keyPrefix, keySuffix, token.RemainQuota))
+			return token, ErrTokenInvalid
 		}
 		return token, nil
 	}
-	return nil, errors.New("invalid api key")
+	common.SysLog("ValidateUserToken: failed to get token: " + err.Error())
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrTokenInvalid
+	}
+	return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
 }
 
 func GetTokenByIds(id int, userId int) (*Token, error) {
 	if id == 0 || userId == 0 {
-		return nil, errors.New("id or userId is empty")
+		return nil, errors.New("id 或 userId 为空！")
 	}
 	token := Token{Id: id, UserId: userId}
 	var err error = nil
@@ -127,7 +244,7 @@ func GetTokenByIds(id int, userId int) (*Token, error) {
 
 func GetTokenById(id int) (*Token, error) {
 	if id == 0 {
-		return nil, errors.New("id is empty")
+		return nil, errors.New("id 为空！")
 	}
 	token := Token{Id: id}
 	var err error = nil
@@ -185,7 +302,7 @@ func (token *Token) Update() (err error) {
 		}
 	}()
 	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
-		"model_limits_enabled", "model_limits", "allow_ips", "group").Updates(token).Error
+		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(token).Error
 	return err
 }
 
@@ -252,7 +369,7 @@ func DisableModelLimits(tokenId int) error {
 func DeleteTokenById(id int, userId int) (err error) {
 	// Why we need userId here? In case user want to delete other's token.
 	if id == 0 || userId == 0 {
-		return errors.New("id or userId is empty")
+		return errors.New("id 或 userId 为空！")
 	}
 	token := Token{Id: id, UserId: userId}
 	err = DB.Where(token).First(&token).Error
@@ -262,9 +379,9 @@ func DeleteTokenById(id int, userId int) (err error) {
 	return token.Delete()
 }
 
-func IncreaseTokenQuota(id int, key string, quota int) (err error) {
+func IncreaseTokenQuota(tokenId int, key string, quota int) (err error) {
 	if quota < 0 {
-		return errors.New("quota cannot be negative")
+		return errors.New("quota 不能为负数！")
 	}
 	if common.RedisEnabled {
 		gopool.Go(func() {
@@ -275,10 +392,10 @@ func IncreaseTokenQuota(id int, key string, quota int) (err error) {
 		})
 	}
 	if common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeTokenQuota, id, quota)
+		addNewRecord(BatchUpdateTypeTokenQuota, tokenId, quota)
 		return nil
 	}
-	return increaseTokenQuota(id, quota)
+	return increaseTokenQuota(tokenId, quota)
 }
 
 func increaseTokenQuota(id int, quota int) (err error) {
@@ -294,7 +411,7 @@ func increaseTokenQuota(id int, quota int) (err error) {
 
 func DecreaseTokenQuota(id int, key string, quota int) (err error) {
 	if quota < 0 {
-		return errors.New("quota cannot be negative")
+		return errors.New("quota 不能为负数！")
 	}
 	if common.RedisEnabled {
 		gopool.Go(func() {
@@ -332,7 +449,7 @@ func CountUserTokens(userId int) (int64, error) {
 // BatchDeleteTokens 删除指定用户的一组令牌，返回成功删除数量
 func BatchDeleteTokens(ids []int, userId int) (int, error) {
 	if len(ids) == 0 {
-		return 0, errors.New("ids cannot be empty")
+		return 0, errors.New("ids 不能为空！")
 	}
 
 	tx := DB.Begin()
@@ -363,71 +480,81 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 	return len(tokens), nil
 }
 
-// ===================== Admin Token Management Functions =====================
+func GetTokenKeysByIds(ids []int, userId int) ([]Token, error) {
+	var tokens []Token
+	err := DB.Select("id", commonKeyCol).
+		Where("user_id = ? AND id IN (?)", userId, ids).
+		Find(&tokens).Error
+	return tokens, err
+}
 
-// GetAllTokensByUserId 管理员获取指定用户的所有Token（不验证当前用户身份）
 func GetAllTokensByUserId(userId int, startIdx int, num int) ([]*Token, error) {
 	var tokens []*Token
 	err := DB.Where("user_id = ?", userId).Order("id desc").Limit(num).Offset(startIdx).Find(&tokens).Error
 	return tokens, err
 }
 
-// CountTokensByUserId 统计指定用户的Token数量
 func CountTokensByUserId(userId int) (int64, error) {
-	var total int64
-	err := DB.Model(&Token{}).Where("user_id = ?", userId).Count(&total).Error
-	return total, err
+	return CountUserTokens(userId)
 }
 
-// SearchTokensByUserId 管理员搜索指定用户的Token
-func SearchTokensByUserId(userId int, keyword string, tokenKey string) ([]*Token, error) {
-	var tokens []*Token
-	if tokenKey != "" {
-		tokenKey = strings.TrimPrefix(tokenKey, "sk-")
-	}
-	err := DB.Where("user_id = ?", userId).
-		Where("name LIKE ?", "%"+keyword+"%").
-		Where(commonKeyCol+" LIKE ?", "%"+tokenKey+"%").
-		Find(&tokens).Error
-	return tokens, err
+func SearchTokensByUserId(userId int, keyword string, tokenKey string, offset int, limit int) ([]*Token, int64, error) {
+	return SearchUserTokens(userId, keyword, tokenKey, offset, limit)
 }
 
-// GetTokenByIdAdmin 管理员通过ID获取Token（不验证用户身份）
 func GetTokenByIdAdmin(id int) (*Token, error) {
 	if id == 0 {
-		return nil, errors.New("id is empty")
+		return nil, errors.New("id 为空！")
 	}
 	var token Token
 	err := DB.First(&token, "id = ?", id).Error
 	return &token, err
 }
 
-// DeleteTokenByIdAdmin 管理员删除Token（不验证用户身份）
-func DeleteTokenByIdAdmin(id int) (err error) {
-	if id == 0 {
-		return errors.New("id is empty")
-	}
-	var token Token
-	err = DB.First(&token, "id = ?", id).Error
+func DeleteTokenByIdAdmin(id int) error {
+	token, err := GetTokenByIdAdmin(id)
 	if err != nil {
 		return err
 	}
 	return token.Delete()
 }
 
-// UpdateTokenAdmin 管理员更新Token（完整更新）
-func UpdateTokenAdmin(token *Token) (err error) {
-	defer func() {
-		if shouldUpdateRedis(true, err) {
-			gopool.Go(func() {
-				err := cacheSetToken(*token)
-				if err != nil {
-					common.SysLog("failed to update token cache: " + err.Error())
-				}
-			})
+func UpdateTokenAdmin(token *Token) error {
+	return token.Update()
+}
+
+// InvalidateUserTokensCache 清理指定用户所有令牌在 Redis 中的缓存，
+// 配合 InvalidateUserCache 使用，可在用户被禁用/删除时立即阻断其令牌的请求。
+// 下一次请求将从数据库重新加载令牌及用户状态，从而立即识别出被禁用的用户。
+func InvalidateUserTokensCache(userId int) error {
+	if !common.RedisEnabled {
+		return nil
+	}
+	if userId <= 0 {
+		return errors.New("userId 无效")
+	}
+	var tokens []Token
+	if err := DB.Unscoped().
+		Select("id", commonKeyCol).
+		Where("user_id = ?", userId).
+		Find(&tokens).Error; err != nil {
+		return err
+	}
+	return invalidateTokensCache(tokens)
+}
+
+func invalidateTokensCache(tokens []Token) error {
+	if !common.RedisEnabled {
+		return nil
+	}
+	var firstErr error
+	for _, t := range tokens {
+		if t.Key == "" {
+			continue
 		}
-	}()
-	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
-		"model_limits_enabled", "model_limits", "allow_ips", "group").Updates(token).Error
-	return err
+		if err := cacheDeleteToken(t.Key); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

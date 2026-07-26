@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/QuantumNous/new-api/types"
 
@@ -14,9 +15,19 @@ type AudioRequest struct {
 	Voice          string          `json:"voice"`
 	Instructions   string          `json:"instructions,omitempty"`
 	ResponseFormat string          `json:"response_format,omitempty"`
-	Speed          float64         `json:"speed,omitempty"`
+	Speed          *float64        `json:"speed,omitempty"`
 	StreamFormat   string          `json:"stream_format,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	// vllm-omini
+	TaskType                json.RawMessage `json:"task_type,omitempty"`
+	Language                json.RawMessage `json:"language,omitempty"`
+	RefAudio                json.RawMessage `json:"ref_audio,omitempty"`
+	RefText                 json.RawMessage `json:"ref_text,omitempty"`
+	XVectorOnlyMode         json.RawMessage `json:"x_vector_only_mode,omitempty"`
+	MaxNewTokens            json.RawMessage `json:"max_new_tokens,omitempty"`
+	InitialCodecChunkFrames json.RawMessage `json:"initial_codec_chunk_frames,omitempty"`
+	// TODO：ensure that the logic remains correct after the stream is started.
+	//Stream                  json.RawMessage `json:"stream,omitempty"`
 }
 
 func (r *AudioRequest) GetTokenCountMeta() *types.TokenCountMeta {
@@ -24,11 +35,14 @@ func (r *AudioRequest) GetTokenCountMeta() *types.TokenCountMeta {
 		CombineText: r.Input,
 		TokenType:   types.TokenTypeTextNumber,
 	}
+	if strings.Contains(r.Model, "gpt") {
+		meta.TokenType = types.TokenTypeTokenizer
+	}
 	return meta
 }
 
 func (r *AudioRequest) IsStream(c *gin.Context) bool {
-	return false
+	return r.StreamFormat == "sse"
 }
 
 func (r *AudioRequest) SetModelName(modelName string) {

@@ -1,13 +1,13 @@
 package ratio_setting
 
 import (
-	"encoding/json"
-	"sync"
-
-	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/types"
 )
 
 var defaultCacheRatio = map[string]float64{
+	"gemini-3-flash-preview":              0.1,
+	"gemini-3-pro-preview":                0.1,
+	"gemini-3.1-pro-preview":              0.1,
 	"gpt-4":                               0.5,
 	"o1":                                  0.5,
 	"o1-2024-12-17":                       0.5,
@@ -43,6 +43,7 @@ var defaultCacheRatio = map[string]float64{
 	"claude-3-opus-20240229":              0.1,
 	"claude-3-haiku-20240307":             0.1,
 	"claude-3-5-haiku-20241022":           0.1,
+	"claude-haiku-4-5-20251001":           0.1,
 	"claude-3-5-sonnet-20240620":          0.1,
 	"claude-3-5-sonnet-20241022":          0.1,
 	"claude-3-7-sonnet-20250219":          0.1,
@@ -57,13 +58,37 @@ var defaultCacheRatio = map[string]float64{
 	"claude-sonnet-4-5-20250929-thinking": 0.1,
 	"claude-opus-4-5-20251101":            0.1,
 	"claude-opus-4-5-20251101-thinking":   0.1,
+	"claude-opus-4-6":                     0.1,
+	"claude-opus-4-6-thinking":            0.1,
+	"claude-opus-4-6-max":                 0.1,
+	"claude-opus-4-6-high":                0.1,
+	"claude-opus-4-6-medium":              0.1,
+	"claude-opus-4-6-low":                 0.1,
+	"claude-opus-4-7":                     0.1,
+	"claude-opus-4-7-thinking":            0.1,
+	"claude-opus-4-7-max":                 0.1,
+	"claude-opus-4-7-xhigh":               0.1,
+	"claude-opus-4-7-high":                0.1,
+	"claude-opus-4-7-medium":              0.1,
+	"claude-opus-4-7-low":                 0.1,
+	"claude-opus-4-8":                     0.1,
+	"claude-opus-4-8-thinking":            0.1,
+	"claude-opus-4-8-max":                 0.1,
+	"claude-opus-4-8-xhigh":               0.1,
+	"claude-opus-4-8-high":                0.1,
+	"claude-opus-4-8-medium":              0.1,
+	"claude-opus-4-8-low":                 0.1,
 }
 
 var defaultCreateCacheRatio = map[string]float64{
+	"gpt-5.6-sol":                         1.25,
+	"gpt-5.6-terra":                       1.25,
+	"gpt-5.6-luna":                        1.25,
 	"claude-3-sonnet-20240229":            1.25,
 	"claude-3-opus-20240229":              1.25,
 	"claude-3-haiku-20240307":             1.25,
 	"claude-3-5-haiku-20241022":           1.25,
+	"claude-haiku-4-5-20251001":           1.25,
 	"claude-3-5-sonnet-20240620":          1.25,
 	"claude-3-5-sonnet-20241022":          1.25,
 	"claude-3-7-sonnet-20250219":          1.25,
@@ -78,48 +103,61 @@ var defaultCreateCacheRatio = map[string]float64{
 	"claude-sonnet-4-5-20250929-thinking": 1.25,
 	"claude-opus-4-5-20251101":            1.25,
 	"claude-opus-4-5-20251101-thinking":   1.25,
+	"claude-opus-4-6":                     1.25,
+	"claude-opus-4-6-thinking":            1.25,
+	"claude-opus-4-6-max":                 1.25,
+	"claude-opus-4-6-high":                1.25,
+	"claude-opus-4-6-medium":              1.25,
+	"claude-opus-4-6-low":                 1.25,
+	"claude-opus-4-7":                     1.25,
+	"claude-opus-4-7-thinking":            1.25,
+	"claude-opus-4-7-max":                 1.25,
+	"claude-opus-4-7-xhigh":               1.25,
+	"claude-opus-4-7-high":                1.25,
+	"claude-opus-4-7-medium":              1.25,
+	"claude-opus-4-7-low":                 1.25,
+	"claude-opus-4-8":                     1.25,
+	"claude-opus-4-8-thinking":            1.25,
+	"claude-opus-4-8-max":                 1.25,
+	"claude-opus-4-8-xhigh":               1.25,
+	"claude-opus-4-8-high":                1.25,
+	"claude-opus-4-8-medium":              1.25,
+	"claude-opus-4-8-low":                 1.25,
 }
 
 //var defaultCreateCacheRatio = map[string]float64{}
 
-var cacheRatioMap map[string]float64
-var cacheRatioMapMutex sync.RWMutex
+var cacheRatioMap = types.NewRWMap[string, float64]()
+var createCacheRatioMap = types.NewRWMap[string, float64]()
 
-// GetCacheRatioMap returns the cache ratio map
+// GetCacheRatioMap returns a copy of the cache ratio map
 func GetCacheRatioMap() map[string]float64 {
-	cacheRatioMapMutex.RLock()
-	defer cacheRatioMapMutex.RUnlock()
-	return cacheRatioMap
+	return cacheRatioMap.ReadAll()
 }
 
 // CacheRatio2JSONString converts the cache ratio map to a JSON string
 func CacheRatio2JSONString() string {
-	cacheRatioMapMutex.RLock()
-	defer cacheRatioMapMutex.RUnlock()
-	jsonBytes, err := json.Marshal(cacheRatioMap)
-	if err != nil {
-		common.SysLog("error marshalling cache ratio: " + err.Error())
-	}
-	return string(jsonBytes)
+	return cacheRatioMap.MarshalJSONString()
+}
+
+// CreateCacheRatio2JSONString converts the create cache ratio map to a JSON string
+func CreateCacheRatio2JSONString() string {
+	return createCacheRatioMap.MarshalJSONString()
 }
 
 // UpdateCacheRatioByJSONString updates the cache ratio map from a JSON string
 func UpdateCacheRatioByJSONString(jsonStr string) error {
-	cacheRatioMapMutex.Lock()
-	defer cacheRatioMapMutex.Unlock()
-	cacheRatioMap = make(map[string]float64)
-	err := json.Unmarshal([]byte(jsonStr), &cacheRatioMap)
-	if err == nil {
-		InvalidateExposedDataCache()
-	}
-	return err
+	return types.LoadFromJsonStringWithCallback(cacheRatioMap, jsonStr, InvalidateExposedDataCache)
+}
+
+// UpdateCreateCacheRatioByJSONString updates the create cache ratio map from a JSON string
+func UpdateCreateCacheRatioByJSONString(jsonStr string) error {
+	return types.LoadFromJsonStringWithCallback(createCacheRatioMap, jsonStr, InvalidateExposedDataCache)
 }
 
 // GetCacheRatio returns the cache ratio for a model
 func GetCacheRatio(name string) (float64, bool) {
-	cacheRatioMapMutex.RLock()
-	defer cacheRatioMapMutex.RUnlock()
-	ratio, ok := cacheRatioMap[name]
+	ratio, ok := cacheRatioMap.Get(name)
 	if !ok {
 		return 1, false // Default to 1 if not found
 	}
@@ -127,7 +165,7 @@ func GetCacheRatio(name string) (float64, bool) {
 }
 
 func GetCreateCacheRatio(name string) (float64, bool) {
-	ratio, ok := defaultCreateCacheRatio[name]
+	ratio, ok := createCacheRatioMap.Get(name)
 	if !ok {
 		return 1.25, false // Default to 1.25 if not found
 	}
@@ -135,11 +173,9 @@ func GetCreateCacheRatio(name string) (float64, bool) {
 }
 
 func GetCacheRatioCopy() map[string]float64 {
-	cacheRatioMapMutex.RLock()
-	defer cacheRatioMapMutex.RUnlock()
-	copyMap := make(map[string]float64, len(cacheRatioMap))
-	for k, v := range cacheRatioMap {
-		copyMap[k] = v
-	}
-	return copyMap
+	return cacheRatioMap.ReadAll()
+}
+
+func GetCreateCacheRatioCopy() map[string]float64 {
+	return createCacheRatioMap.ReadAll()
 }

@@ -1,7 +1,6 @@
 package model
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,6 +9,8 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 )
@@ -26,8 +27,16 @@ type Pricing struct {
 	ModelPrice             float64                 `json:"model_price"`
 	OwnerBy                string                  `json:"owner_by"`
 	CompletionRatio        float64                 `json:"completion_ratio"`
+	CacheRatio             *float64                `json:"cache_ratio,omitempty"`
+	CreateCacheRatio       *float64                `json:"create_cache_ratio,omitempty"`
+	ImageRatio             *float64                `json:"image_ratio,omitempty"`
+	AudioRatio             *float64                `json:"audio_ratio,omitempty"`
+	AudioCompletionRatio   *float64                `json:"audio_completion_ratio,omitempty"`
 	EnableGroup            []string                `json:"enable_groups"`
 	SupportedEndpointTypes []constant.EndpointType `json:"supported_endpoint_types"`
+	BillingMode            string                  `json:"billing_mode,omitempty"`
+	BillingExpr            string                  `json:"billing_expr,omitempty"`
+	PricingVersion         string                  `json:"pricing_version,omitempty"`
 	IsFeatured             bool                    `json:"is_featured"`
 	FeaturedOrder          int                     `json:"featured_order"`
 	Category               string                  `json:"category,omitempty"`
@@ -73,6 +82,15 @@ func GetPricing() []Pricing {
 	return pricingMap
 }
 
+func InvalidatePricingCache() {
+	updatePricingLock.Lock()
+	defer updatePricingLock.Unlock()
+
+	pricingMap = nil
+	vendorsList = nil
+	lastGetPricingTime = time.Time{}
+}
+
 // GetVendors 返回当前定价接口使用到的供应商信息
 func GetVendors() []PricingVendor {
 	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
@@ -92,6 +110,76 @@ func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
 		return endpoints
 	}
 	return make([]constant.EndpointType, 0)
+}
+
+func getPricingEndpointTypesForAbility(ability AbilityWithChannel, advancedCustomConfigs map[int]*dto.AdvancedCustomConfig) []constant.EndpointType {
+	if ability.ChannelType != constant.ChannelTypeAdvancedCustom {
+		return common.GetEndpointTypesByChannelType(ability.ChannelType, ability.Model)
+	}
+	if config := advancedCustomConfigs[ability.ChannelId]; config != nil {
+		return config.SupportedEndpointTypesForModel(ability.Model)
+	}
+	return common.GetEndpointTypesByChannelType(ability.ChannelType, ability.Model)
+}
+
+// loadPricingAdvancedCustomConfigs runs inside updatePricing while
+// updatePricingLock is held, and nests channelSyncLock.RLock. This defines the
+// global lock order updatePricingLock -> channelSyncLock: any code path holding
+// channelSyncLock must release it before touching the pricing cache (see
+// InitChannelCache / CacheUpdateChannel), otherwise it deadlocks.
+// The returned configs are pointers shared with the channel cache; they are
+// replaced wholesale on update and never mutated in place, so reading them after
+// RUnlock is safe.
+func loadPricingAdvancedCustomConfigs(enableAbilities []AbilityWithChannel) map[int]*dto.AdvancedCustomConfig {
+	channelIDs := make([]int, 0)
+	seen := make(map[int]struct{})
+	for _, ability := range enableAbilities {
+		if ability.ChannelType != constant.ChannelTypeAdvancedCustom {
+			continue
+		}
+		if _, exists := seen[ability.ChannelId]; exists {
+			continue
+		}
+		seen[ability.ChannelId] = struct{}{}
+		channelIDs = append(channelIDs, ability.ChannelId)
+	}
+	if len(channelIDs) == 0 {
+		return nil
+	}
+
+	configs := make(map[int]*dto.AdvancedCustomConfig, len(channelIDs))
+	if common.MemoryCacheEnabled {
+		channelSyncLock.RLock()
+		defer channelSyncLock.RUnlock()
+		for _, channelID := range channelIDs {
+			if config := channel2advancedCustomConfig[channelID]; config != nil {
+				configs[channelID] = config
+			}
+		}
+		return configs
+	}
+
+	for _, channelID := range channelIDs {
+		channel, err := CacheGetChannel(channelID)
+		if err != nil {
+			common.SysLog(fmt.Sprintf("load advanced custom channel settings error: channel_id=%d, error=%v", channelID, err))
+			continue
+		}
+		if channel.Type != constant.ChannelTypeAdvancedCustom {
+			continue
+		}
+		if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
+			configs[channelID] = config
+		}
+	}
+	return configs
+}
+
+func appendPricingEndpoint(endpoints []string, endpoint string) []string {
+	if endpoint == "" || common.StringsContains(endpoints, endpoint) {
+		return endpoints
+	}
+	return append(endpoints, endpoint)
 }
 
 func updatePricing() {
@@ -188,11 +276,12 @@ func updatePricing() {
 
 	//这里使用切片而不是Set，因为一个模型可能支持多个端点类型，并且第一个端点是优先使用端点
 	modelSupportEndpointsStr := make(map[string][]string)
+	advancedCustomConfigs := loadPricingAdvancedCustomConfigs(enableAbilities)
 
 	// 先根据已有能力填充原生端点
 	for _, ability := range enableAbilities {
 		endpoints := modelSupportEndpointsStr[ability.Model]
-		channelTypes := common.GetEndpointTypesByChannelType(ability.ChannelType, ability.Model)
+		channelTypes := getPricingEndpointTypesForAbility(ability, advancedCustomConfigs)
 		for _, channelType := range channelTypes {
 			if !common.StringsContains(endpoints, string(channelType)) {
 				endpoints = append(endpoints, string(channelType))
@@ -201,20 +290,23 @@ func updatePricing() {
 		modelSupportEndpointsStr[ability.Model] = endpoints
 	}
 
-	// 再补充模型自定义端点
+	// 再补充模型自定义端点：若配置有效则追加到已有推断，不再裁剪渠道真实能力
 	for modelName, meta := range metaMap {
 		if strings.TrimSpace(meta.Endpoints) == "" {
 			continue
 		}
 		var raw map[string]interface{}
-		if err := json.Unmarshal([]byte(meta.Endpoints), &raw); err == nil {
+		if err := common.Unmarshal([]byte(meta.Endpoints), &raw); err == nil {
 			endpoints := modelSupportEndpointsStr[modelName]
-			for k := range raw {
-				if !common.StringsContains(endpoints, k) {
-					endpoints = append(endpoints, k)
+			for k, v := range raw {
+				switch v.(type) {
+				case string, map[string]interface{}:
+					endpoints = appendPricingEndpoint(endpoints, k)
 				}
 			}
-			modelSupportEndpointsStr[modelName] = endpoints
+			if len(endpoints) > 0 {
+				modelSupportEndpointsStr[modelName] = endpoints
+			}
 		}
 	}
 
@@ -246,7 +338,7 @@ func updatePricing() {
 			continue
 		}
 		var raw map[string]interface{}
-		if err := json.Unmarshal([]byte(meta.Endpoints), &raw); err == nil {
+		if err := common.Unmarshal([]byte(meta.Endpoints), &raw); err == nil {
 			for k, v := range raw {
 				switch val := v.(type) {
 				case string:
@@ -275,7 +367,7 @@ func updatePricing() {
 			SupportedEndpointTypes: modelSupportEndpointTypes[model],
 		}
 
-		// 补充模型元数据（描述、标签、供应商、状态、精选）
+		// 补充模型元数据（描述、标签、供应商、状态、LangBot Space 展示字段）
 		if meta, ok := metaMap[model]; ok {
 			// 若模型被禁用(status!=1)，则直接跳过，不返回给前端
 			if meta.Status != 1 {
@@ -291,7 +383,7 @@ func updatePricing() {
 			pricing.Category = meta.Category
 			if meta.Category == "chat" && meta.LLMAbilities != "" {
 				var abilities []string
-				if json.Unmarshal([]byte(meta.LLMAbilities), &abilities) == nil {
+				if err := common.Unmarshal([]byte(meta.LLMAbilities), &abilities); err == nil {
 					pricing.LLMAbilities = abilities
 				}
 			}
@@ -306,7 +398,35 @@ func updatePricing() {
 			pricing.CompletionRatio = ratio_setting.GetCompletionRatio(model)
 			pricing.QuotaType = 0
 		}
+		if cacheRatio, ok := ratio_setting.GetCacheRatio(model); ok {
+			pricing.CacheRatio = &cacheRatio
+		}
+		if createCacheRatio, ok := ratio_setting.GetCreateCacheRatio(model); ok {
+			pricing.CreateCacheRatio = &createCacheRatio
+		}
+		if imageRatio, ok := ratio_setting.GetImageRatio(model); ok {
+			pricing.ImageRatio = &imageRatio
+		}
+		if ratio_setting.ContainsAudioRatio(model) {
+			audioRatio := ratio_setting.GetAudioRatio(model)
+			pricing.AudioRatio = &audioRatio
+		}
+		if ratio_setting.ContainsAudioCompletionRatio(model) {
+			audioCompletionRatio := ratio_setting.GetAudioCompletionRatio(model)
+			pricing.AudioCompletionRatio = &audioCompletionRatio
+		}
+		if billingMode := billing_setting.GetBillingMode(model); billingMode == "tiered_expr" {
+			if expr, ok := billing_setting.GetBillingExpr(model); ok && strings.TrimSpace(expr) != "" {
+				pricing.BillingMode = billingMode
+				pricing.BillingExpr = expr
+			}
+		}
 		pricingMap = append(pricingMap, pricing)
+	}
+
+	// 防止大更新后数据不通用
+	if len(pricingMap) > 0 {
+		pricingMap[0].PricingVersion = "5a90f2b86c08bd983a9a2e6d66c255f4eaef9c4bc934386d2b6ae84ef0ff1f1f"
 	}
 
 	// 刷新缓存映射，供高并发快速查询

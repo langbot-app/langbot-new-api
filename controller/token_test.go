@@ -48,21 +48,21 @@ type sqliteColumnInfo struct {
 }
 
 type legacyToken struct {
-	Id                 int            `gorm:"primaryKey"`
-	UserId             int            `gorm:"index"`
-	Key                string         `gorm:"column:key;type:char(48);uniqueIndex"`
-	Status             int            `gorm:"default:1"`
-	Name               string         `gorm:"index"`
-	CreatedTime        int64          `gorm:"bigint"`
-	AccessedTime       int64          `gorm:"bigint"`
-	ExpiredTime        int64          `gorm:"bigint;default:-1"`
-	RemainQuota        int            `gorm:"default:0"`
+	Id                 int    `gorm:"primaryKey"`
+	UserId             int    `gorm:"index"`
+	Key                string `gorm:"column:key;type:char(48);uniqueIndex"`
+	Status             int    `gorm:"default:1"`
+	Name               string `gorm:"index"`
+	CreatedTime        int64  `gorm:"bigint"`
+	AccessedTime       int64  `gorm:"bigint"`
+	ExpiredTime        int64  `gorm:"bigint;default:-1"`
+	RemainQuota        int    `gorm:"default:0"`
 	UnlimitedQuota     bool
 	ModelLimitsEnabled bool
-	ModelLimits        string         `gorm:"type:text"`
-	AllowIps           *string        `gorm:"default:''"`
-	UsedQuota          int            `gorm:"default:0"`
-	Group              string         `gorm:"column:group;default:''"`
+	ModelLimits        string  `gorm:"type:text"`
+	AllowIps           *string `gorm:"default:''"`
+	UsedQuota          int     `gorm:"default:0"`
+	Group              string  `gorm:"column:group;default:''"`
 	CrossGroupRetry    bool
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 }
@@ -75,9 +75,7 @@ func openTokenControllerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
-	common.UsingSQLite = true
-	common.UsingMySQL = false
-	common.UsingPostgreSQL = false
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	common.RedisEnabled = false
 
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
@@ -119,22 +117,23 @@ func openTokenControllerExternalDB(t *testing.T, dialect string, dsn string) (*g
 
 	gin.SetMode(gin.TestMode)
 	common.RedisEnabled = false
-	common.UsingSQLite = false
-	common.UsingMySQL = dialect == "mysql"
-	common.UsingPostgreSQL = dialect == "postgres"
 
 	var (
-		db  *gorm.DB
-		err error
+		db     *gorm.DB
+		dbType common.DatabaseType
+		err    error
 	)
 	switch dialect {
 	case "mysql":
+		dbType = common.DatabaseTypeMySQL
 		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	case "postgres":
+		dbType = common.DatabaseTypePostgreSQL
 		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	default:
 		t.Fatalf("unsupported dialect %q", dialect)
 	}
+	common.SetDatabaseTypes(dbType, dbType)
 	if err != nil {
 		t.Fatalf("failed to open %s db: %v", dialect, err)
 	}
@@ -537,5 +536,79 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 	}
 	if strings.Contains(unauthorizedRecorder.Body.String(), token.Key) {
 		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
+	}
+}
+
+func TestAdminGetUserTokensReturnsFullKeys(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 10, "admin-visible-token", "admin1234full5678")
+	seedToken(t, db, 11, "other-user-token", "other1234full5678")
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/admin/token/user/10?p=1&page_size=10", nil, 1)
+	ctx.Params = gin.Params{{Key: "user_id", Value: "10"}}
+	AdminGetUserTokens(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	if !response.Success {
+		t.Fatalf("expected success response, got message: %s", response.Message)
+	}
+
+	var page tokenPageResponse
+	if err := common.Unmarshal(response.Data, &page); err != nil {
+		t.Fatalf("failed to decode admin token page response: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("expected exactly one admin token, got %d", len(page.Items))
+	}
+	if page.Items[0].Key != token.GetFullKey() {
+		t.Fatalf("expected full key %q, got %q", token.GetFullKey(), page.Items[0].Key)
+	}
+	if page.Items[0].Key == token.GetMaskedKey() {
+		t.Fatalf("admin token response was masked")
+	}
+}
+
+func TestAdminCreateTokenForUserReturnsFullKey(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	if err := db.AutoMigrate(&model.User{}); err != nil {
+		t.Fatalf("failed to migrate users table: %v", err)
+	}
+	if err := db.Create(&model.User{
+		Id:       12,
+		Username: "token-owner",
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+	}).Error; err != nil {
+		t.Fatalf("failed to create token owner: %v", err)
+	}
+
+	body := map[string]any{
+		"name":                 "space-token",
+		"expired_time":         -1,
+		"remain_quota":         0,
+		"unlimited_quota":      true,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "",
+		"cross_group_retry":    false,
+	}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/admin/token/user/12", body, 1)
+	ctx.Params = gin.Params{{Key: "user_id", Value: "12"}}
+	AdminCreateToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	if !response.Success {
+		t.Fatalf("expected success response, got message: %s", response.Message)
+	}
+
+	var detail tokenResponseItem
+	if err := common.Unmarshal(response.Data, &detail); err != nil {
+		t.Fatalf("failed to decode admin token create response: %v", err)
+	}
+	if detail.Key == "" {
+		t.Fatalf("expected created admin token response to include full key")
+	}
+	if detail.Key == model.MaskTokenKey(detail.Key) {
+		t.Fatalf("expected unmasked created token key, got %q", detail.Key)
 	}
 }

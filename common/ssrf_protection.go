@@ -29,45 +29,107 @@ var DefaultSSRFProtection = &SSRFProtection{
 	AllowedPorts:     []int{},
 }
 
-// isPrivateIP 检查IP是否为私有地址
+// NewSSRFProtectionFromFetchSetting builds an SSRFProtection from persisted fetch_setting values.
+func NewSSRFProtectionFromFetchSetting(allowPrivateIp bool, domainFilterMode bool, ipFilterMode bool, domainList, ipList, allowedPorts []string, applyIPFilterForDomain bool) (*SSRFProtection, error) {
+	allowedPortInts, err := parsePortRanges(allowedPorts)
+	if err != nil {
+		return nil, fmt.Errorf("request reject - invalid port configuration: %v", err)
+	}
+
+	return &SSRFProtection{
+		AllowPrivateIp:         allowPrivateIp,
+		DomainFilterMode:       domainFilterMode,
+		DomainList:             domainList,
+		IpFilterMode:           ipFilterMode,
+		IpList:                 ipList,
+		AllowedPorts:           allowedPortInts,
+		ApplyIPFilterForDomain: applyIPFilterForDomain,
+	}, nil
+}
+
+// privateIPv4Nets IPv4 私有/保留/特殊用途网段
+// 参考 IANA IPv4 Special-Purpose Address Registry
+// https://www.iana.org/assignments/iana-ipv4-special-registry/
+var privateIPv4Nets = []net.IPNet{
+	{IP: net.IPv4(0, 0, 0, 0), Mask: net.CIDRMask(8, 32)},          // 0.0.0.0/8 ("This network" / 未指定)
+	{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(8, 32)},         // 10.0.0.0/8 (私有)
+	{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},      // 100.64.0.0/10 (运营商级 NAT / CGNAT)
+	{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)},        // 127.0.0.0/8 (回环)
+	{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)},     // 169.254.0.0/16 (链路本地)
+	{IP: net.IPv4(172, 16, 0, 0), Mask: net.CIDRMask(12, 32)},      // 172.16.0.0/12 (私有)
+	{IP: net.IPv4(192, 0, 0, 0), Mask: net.CIDRMask(24, 32)},       // 192.0.0.0/24 (IETF 协议分配)
+	{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)},       // 192.0.2.0/24 (TEST-NET-1)
+	{IP: net.IPv4(192, 168, 0, 0), Mask: net.CIDRMask(16, 32)},     // 192.168.0.0/16 (私有)
+	{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)},      // 198.18.0.0/15 (基准测试)
+	{IP: net.IPv4(198, 51, 100, 0), Mask: net.CIDRMask(24, 32)},    // 198.51.100.0/24 (TEST-NET-2)
+	{IP: net.IPv4(203, 0, 113, 0), Mask: net.CIDRMask(24, 32)},     // 203.0.113.0/24 (TEST-NET-3)
+	{IP: net.IPv4(224, 0, 0, 0), Mask: net.CIDRMask(4, 32)},        // 224.0.0.0/4 (组播)
+	{IP: net.IPv4(240, 0, 0, 0), Mask: net.CIDRMask(4, 32)},        // 240.0.0.0/4 (保留)
+	{IP: net.IPv4(255, 255, 255, 255), Mask: net.CIDRMask(32, 32)}, // 255.255.255.255/32 (受限广播)
+}
+
+// privateIPv6Nets IPv6 私有/保留/特殊用途网段
+// 参考 IANA IPv6 Special-Purpose Address Registry
+// https://www.iana.org/assignments/iana-ipv6-special-registry/
+var privateIPv6Nets = func() []net.IPNet {
+	cidrs := []string{
+		"::/128",        // 未指定地址
+		"::1/128",       // 回环
+		"::ffff:0:0/96", // IPv4-mapped
+		"64:ff9b::/96",  // IPv4/IPv6 translation
+		"100::/64",      // Discard-Only
+		"2001::/23",     // IETF Protocol Assignments
+		"2001:db8::/32", // 文档
+		"fc00::/7",      // Unique Local Address (ULA)
+		"fe80::/10",     // 链路本地
+		"ff00::/8",      // 组播
+	}
+	nets := make([]net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(c); err == nil && n != nil {
+			nets = append(nets, *n)
+		}
+	}
+	return nets
+}()
+
+// isPrivateIP 检查IP是否为私有/保留/特殊用途地址
 func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	// 未指定地址 (0.0.0.0, ::)
+	if ip.IsUnspecified() {
+		return true
+	}
+	// 回环、链路本地 (unicast/multicast)
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
-
-	// 检查私有网段
-	private := []net.IPNet{
-		{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(8, 32)},     // 10.0.0.0/8
-		{IP: net.IPv4(172, 16, 0, 0), Mask: net.CIDRMask(12, 32)},  // 172.16.0.0/12
-		{IP: net.IPv4(192, 168, 0, 0), Mask: net.CIDRMask(16, 32)}, // 192.168.0.0/16
-		{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)},    // 127.0.0.0/8
-		{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)}, // 169.254.0.0/16 (链路本地)
-		{IP: net.IPv4(224, 0, 0, 0), Mask: net.CIDRMask(4, 32)},    // 224.0.0.0/4 (组播)
-		{IP: net.IPv4(240, 0, 0, 0), Mask: net.CIDRMask(4, 32)},    // 240.0.0.0/4 (保留)
+	// 接口本地组播 (IPv6 ff01::/16 等)
+	if ip.IsInterfaceLocalMulticast() {
+		return true
 	}
 
-	for _, privateNet := range private {
+	if v4 := ip.To4(); v4 != nil {
+		for _, privateNet := range privateIPv4Nets {
+			if privateNet.Contains(v4) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// IPv6 检查
+	for _, privateNet := range privateIPv6Nets {
 		if privateNet.Contains(ip) {
 			return true
 		}
 	}
-
-	// 检查IPv6私有地址
-	if ip.To4() == nil {
-		// IPv6 loopback
-		if ip.Equal(net.IPv6loopback) {
-			return true
-		}
-		// IPv6 link-local
-		if strings.HasPrefix(ip.String(), "fe80:") {
-			return true
-		}
-		// IPv6 unique local
-		if strings.HasPrefix(ip.String(), "fc") || strings.HasPrefix(ip.String(), "fd") {
-			return true
-		}
+	// 兜底: Go 标准库识别的其他私有地址
+	if ip.IsPrivate() {
+		return true
 	}
-
 	return false
 }
 
@@ -186,23 +248,7 @@ func isIPListed(ip net.IP, list []string) bool {
 		return false
 	}
 
-	for _, whitelistCIDR := range list {
-		_, network, err := net.ParseCIDR(whitelistCIDR)
-		if err != nil {
-			// 尝试作为单个IP处理
-			if whitelistIP := net.ParseIP(whitelistCIDR); whitelistIP != nil {
-				if ip.Equal(whitelistIP) {
-					return true
-				}
-			}
-			continue
-		}
-
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return IsIpInCIDRList(ip, list)
 }
 
 // IsIPAccessAllowed 检查IP是否允许访问
@@ -218,6 +264,63 @@ func (p *SSRFProtection) IsIPAccessAllowed(ip net.IP) bool {
 	}
 	// 黑名单
 	return !listed
+}
+
+func (p *SSRFProtection) ipAccessError(host string, ip net.IP) error {
+	if host != "" {
+		if isPrivateIP(ip) && !p.AllowPrivateIp {
+			return fmt.Errorf("private IP address not allowed: %s resolves to %s", host, ip.String())
+		}
+		if p.IpFilterMode {
+			return fmt.Errorf("ip not in whitelist: %s resolves to %s", host, ip.String())
+		}
+		return fmt.Errorf("ip in blacklist: %s resolves to %s", host, ip.String())
+	}
+
+	if isPrivateIP(ip) && !p.AllowPrivateIp {
+		return fmt.Errorf("private IP address not allowed: %s", ip.String())
+	}
+	if p.IpFilterMode {
+		return fmt.Errorf("ip not in whitelist: %s", ip.String())
+	}
+	return fmt.Errorf("ip in blacklist: %s", ip.String())
+}
+
+// ValidateNetworkTarget validates the host and port before dialing.
+func (p *SSRFProtection) ValidateNetworkTarget(host string, port int) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("invalid host")
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port: %d", port)
+	}
+	if !p.isAllowedPort(port) {
+		return fmt.Errorf("port %d is not allowed", port)
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if !p.IsIPAccessAllowed(ip) {
+			return p.ipAccessError("", ip)
+		}
+		return nil
+	}
+
+	if !p.isDomainAllowed(host) {
+		if p.DomainFilterMode {
+			return fmt.Errorf("domain not in whitelist: %s", host)
+		}
+		return fmt.Errorf("domain in blacklist: %s", host)
+	}
+	return nil
+}
+
+// ValidateResolvedIP validates a domain's resolved IP immediately before dialing it.
+func (p *SSRFProtection) ValidateResolvedIP(host string, ip net.IP) error {
+	if !p.IsIPAccessAllowed(ip) {
+		return p.ipAccessError(host, ip)
+	}
+	return nil
 }
 
 // ValidateURL 验证URL是否安全
@@ -251,34 +354,12 @@ func (p *SSRFProtection) ValidateURL(urlStr string) error {
 		return fmt.Errorf("invalid port: %s", portStr)
 	}
 
-	if !p.isAllowedPort(port) {
-		return fmt.Errorf("port %d is not allowed", port)
+	if err := p.ValidateNetworkTarget(host, port); err != nil {
+		return err
 	}
 
-	// 如果 host 是 IP，则跳过域名检查
-	if ip := net.ParseIP(host); ip != nil {
-		if !p.IsIPAccessAllowed(ip) {
-			if isPrivateIP(ip) {
-				return fmt.Errorf("private IP address not allowed: %s", ip.String())
-			}
-			if p.IpFilterMode {
-				return fmt.Errorf("ip not in whitelist: %s", ip.String())
-			}
-			return fmt.Errorf("ip in blacklist: %s", ip.String())
-		}
-		return nil
-	}
-
-	// 先进行域名过滤
-	if !p.isDomainAllowed(host) {
-		if p.DomainFilterMode {
-			return fmt.Errorf("domain not in whitelist: %s", host)
-		}
-		return fmt.Errorf("domain in blacklist: %s", host)
-	}
-
-	// 若未启用对域名应用IP过滤，则到此通过
-	if !p.ApplyIPFilterForDomain {
+	// 如果 host 是 IP，或未启用对域名应用 IP 过滤，则到此通过。
+	if net.ParseIP(host) != nil || !p.ApplyIPFilterForDomain {
 		return nil
 	}
 
@@ -288,14 +369,8 @@ func (p *SSRFProtection) ValidateURL(urlStr string) error {
 		return fmt.Errorf("DNS resolution failed for %s: %v", host, err)
 	}
 	for _, ip := range ips {
-		if !p.IsIPAccessAllowed(ip) {
-			if isPrivateIP(ip) && !p.AllowPrivateIp {
-				return fmt.Errorf("private IP address not allowed: %s resolves to %s", host, ip.String())
-			}
-			if p.IpFilterMode {
-				return fmt.Errorf("ip not in whitelist: %s resolves to %s", host, ip.String())
-			}
-			return fmt.Errorf("ip in blacklist: %s resolves to %s", host, ip.String())
+		if err := p.ValidateResolvedIP(host, ip); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -308,20 +383,9 @@ func ValidateURLWithFetchSetting(urlStr string, enableSSRFProtection, allowPriva
 		return nil
 	}
 
-	// 解析端口范围配置
-	allowedPortInts, err := parsePortRanges(allowedPorts)
+	protection, err := NewSSRFProtectionFromFetchSetting(allowPrivateIp, domainFilterMode, ipFilterMode, domainList, ipList, allowedPorts, applyIPFilterForDomain)
 	if err != nil {
-		return fmt.Errorf("request reject - invalid port configuration: %v", err)
-	}
-
-	protection := &SSRFProtection{
-		AllowPrivateIp:         allowPrivateIp,
-		DomainFilterMode:       domainFilterMode,
-		DomainList:             domainList,
-		IpFilterMode:           ipFilterMode,
-		IpList:                 ipList,
-		AllowedPorts:           allowedPortInts,
-		ApplyIPFilterForDomain: applyIPFilterForDomain,
+		return err
 	}
 	return protection.ValidateURL(urlStr)
 }

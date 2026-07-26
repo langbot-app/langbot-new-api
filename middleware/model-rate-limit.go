@@ -19,6 +19,7 @@ import (
 const (
 	ModelRequestRateLimitCountMark        = "MRRL"
 	ModelRequestRateLimitSuccessCountMark = "MRRLS"
+	modelRateLimitTimeFormat              = "2006-01-02T15:04:05.000Z"
 )
 
 // 检查Redis中的请求限制
@@ -41,13 +42,13 @@ func checkRedisRateLimit(ctx context.Context, rdb *redis.Client, key string, max
 
 	// 检查时间窗口
 	oldTimeStr, _ := rdb.LIndex(ctx, key, -1).Result()
-	oldTime, err := time.Parse(timeFormat, oldTimeStr)
+	oldTime, err := time.Parse(modelRateLimitTimeFormat, oldTimeStr)
 	if err != nil {
 		return false, err
 	}
 
-	nowTimeStr := time.Now().Format(timeFormat)
-	nowTime, err := time.Parse(timeFormat, nowTimeStr)
+	nowTimeStr := time.Now().UTC().Format(modelRateLimitTimeFormat)
+	nowTime, err := time.Parse(modelRateLimitTimeFormat, nowTimeStr)
 	if err != nil {
 		return false, err
 	}
@@ -68,7 +69,7 @@ func recordRedisRequest(ctx context.Context, rdb *redis.Client, key string, maxC
 		return
 	}
 
-	now := time.Now().Format(timeFormat)
+	now := time.Now().UTC().Format(modelRateLimitTimeFormat)
 	rdb.LPush(ctx, key, now)
 	rdb.LTrim(ctx, key, 0, int64(maxCount-1))
 	rdb.Expire(ctx, key, time.Duration(setting.ModelRequestRateLimitDurationMinutes)*time.Minute)
@@ -90,7 +91,7 @@ func redisRateLimitHandler(duration int64, totalMaxCount, successMaxCount int) g
 			return
 		}
 		if !allowed {
-		abortWithOpenAiMessage(c, http.StatusTooManyRequests, fmt.Sprintf("you have reached the request limit: maximum %d requests in %d minutes", successMaxCount, setting.ModelRequestRateLimitDurationMinutes))
+			abortWithOpenAiMessage(c, http.StatusTooManyRequests, fmt.Sprintf("您已达到请求数限制：%d分钟内最多请求%d次", setting.ModelRequestRateLimitDurationMinutes, successMaxCount))
 			return
 		}
 
@@ -114,7 +115,7 @@ func redisRateLimitHandler(duration int64, totalMaxCount, successMaxCount int) g
 			}
 
 			if !allowed {
-				abortWithOpenAiMessage(c, http.StatusTooManyRequests, fmt.Sprintf("you have reached the total request limit: maximum %d requests in %d minutes (including failed requests), please check your request", totalMaxCount, setting.ModelRequestRateLimitDurationMinutes))
+				abortWithOpenAiMessage(c, http.StatusTooManyRequests, fmt.Sprintf("您已达到总请求数限制：%d分钟内最多请求%d次，包括失败次数，请检查您的请求是否正确", setting.ModelRequestRateLimitDurationMinutes, totalMaxCount))
 			}
 		}
 
