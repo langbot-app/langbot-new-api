@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,22 +28,32 @@ func setupManageUserTestDB(t *testing.T) *gorm.DB {
 	common.RedisEnabled = false
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_pragma=busy_timeout(5000)", strings.ReplaceAll(t.Name(), "/", "_"))
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(4)
 	model.DB, model.LOG_DB = db, db
 	require.NoError(t, db.AutoMigrate(
 		&model.User{}, &model.UserSession{}, &model.Log{}, &model.CasbinRule{}, &model.AuthzRole{},
 	))
+	require.NoError(t, db.Exec(`CREATE TABLE user_quota_operations (
+		operation_id varchar(128) NOT NULL,
+		user_id integer NOT NULL,
+		mode varchar(16) NOT NULL,
+		value integer NOT NULL,
+		resulting_quota integer NOT NULL,
+		created_at bigint,
+		updated_at bigint,
+		PRIMARY KEY (operation_id)
+	)`).Error)
 
 	t.Cleanup(func() {
 		model.DB, model.LOG_DB = previousDB, previousLogDB
 		common.RedisEnabled = previousRedisEnabled
 		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
-		sqlDB, err := db.DB()
-		if err == nil {
-			_ = sqlDB.Close()
-		}
+		_ = sqlDB.Close()
 	})
 	return db
 }
@@ -182,6 +193,181 @@ func TestManageUserQuotaReturnsAuthoritativeDataObject(t *testing.T) {
 	var updated model.User
 	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
 	assert.Equal(t, 1250, updated.Quota)
+}
+
+func TestManageUserQuotaOperationIdReplaysOriginalResult(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-idempotent-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-replay"}`, user.Id)
+	first := performManageUserRequest(t, body)
+	second := performManageUserRequest(t, body)
+
+	for _, recorder := range []*httptest.ResponseRecorder{first, second} {
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		var response struct {
+			Success bool           `json:"success"`
+			Data    map[string]int `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.True(t, response.Success)
+		assert.Equal(t, map[string]int{"quota": 1250}, response.Data)
+	}
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1250, updated.Quota)
+
+	var operation struct {
+		UserID         int    `gorm:"column:user_id"`
+		Mode           string `gorm:"column:mode"`
+		Value          int    `gorm:"column:value"`
+		ResultingQuota int    `gorm:"column:resulting_quota"`
+	}
+	require.NoError(t, db.Table("user_quota_operations").Where("operation_id = ?", "quota-op-replay").First(&operation).Error)
+	assert.Equal(t, user.Id, operation.UserID)
+	assert.Equal(t, "add", operation.Mode)
+	assert.Equal(t, 250, operation.Value)
+	assert.Equal(t, 1250, operation.ResultingQuota)
+
+	var count int64
+	require.NoError(t, db.Table("user_quota_operations").Where("operation_id = ?", "quota-op-replay").Count(&count).Error)
+	assert.EqualValues(t, 1, count)
+}
+
+func TestManageUserQuotaOperationIdReplayDoesNotUseCurrentQuotaOrAudit(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-replay-after-change-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-authoritative"}`, user.Id)
+	first := performManageUserRequest(t, body)
+	assert.Contains(t, first.Body.String(), `"success":true`)
+
+	unrelated := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":100}`, user.Id))
+	assert.Contains(t, unrelated.Body.String(), `"success":true`)
+
+	replay := performManageUserRequest(t, body)
+	assert.Equal(t, http.StatusOK, replay.Code)
+	var response struct {
+		Success bool           `json:"success"`
+		Data    map[string]int `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(replay.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, map[string]int{"quota": 1250}, response.Data)
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1350, updated.Quota)
+
+	var auditCount int64
+	require.NoError(t, db.Model(&model.Log{}).Where("type = ?", model.LogTypeManage).Count(&auditCount).Error)
+	assert.EqualValues(t, 2, auditCount)
+}
+
+func TestManageUserQuotaOperationIdConcurrentSameOperationAppliesOnce(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-concurrent-op-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-concurrent"}`, user.Id)
+	start := make(chan struct{})
+	recorders := make(chan *httptest.ResponseRecorder, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			recorders <- performManageUserRequest(t, body)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(recorders)
+
+	for recorder := range recorders {
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		var response struct {
+			Success bool           `json:"success"`
+			Data    map[string]int `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.True(t, response.Success, recorder.Body.String())
+		assert.Equal(t, map[string]int{"quota": 1250}, response.Data)
+	}
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1250, updated.Quota)
+
+	var operationCount int64
+	require.NoError(t, db.Table("user_quota_operations").Where("operation_id = ?", "quota-op-concurrent").Count(&operationCount).Error)
+	assert.EqualValues(t, 1, operationCount)
+
+	var auditCount int64
+	require.NoError(t, db.Model(&model.Log{}).Where("type = ?", model.LogTypeManage).Count(&auditCount).Error)
+	assert.EqualValues(t, 1, auditCount)
+}
+
+func TestManageUserQuotaOperationIdRejectsMismatchedReplay(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-mismatch-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	first := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-mismatch"}`, user.Id))
+	assert.Contains(t, first.Body.String(), `"success":true`)
+
+	second := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":300,"operation_id":"quota-op-mismatch"}`, user.Id))
+	assert.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), `"success":false`)
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1250, updated.Quota)
+
+	var count int64
+	require.NoError(t, db.Table("user_quota_operations").Where("operation_id = ?", "quota-op-mismatch").Count(&count).Error)
+	assert.EqualValues(t, 1, count)
+}
+
+func TestManageUserQuotaOperationIdValidation(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-operation-id-validation-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	bodies := []string{
+		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":""}`, user.Id),
+		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"   "}`, user.Id),
+		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":" quota-op-spaced"}`, user.Id),
+		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"%s"}`, user.Id, strings.Repeat("a", model.MaxUserQuotaOperationIDLength+1)),
+	}
+	for _, body := range bodies {
+		recorder := performManageUserRequest(t, body)
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), `"success":false`)
+	}
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1000, updated.Quota)
 }
 
 func TestManageUserQuotaRejectsNegativeOverride(t *testing.T) {

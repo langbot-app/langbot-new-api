@@ -1084,10 +1084,29 @@ func updateAdminPermissionsForUserInTx(c *gin.Context, tx *gorm.DB, userID int, 
 }
 
 type ManageRequest struct {
-	Id     int    `json:"id"`
-	Action string `json:"action"`
-	Value  int    `json:"value"`
-	Mode   string `json:"mode"`
+	Id          int     `json:"id"`
+	Action      string  `json:"action"`
+	Value       int     `json:"value"`
+	Mode        string  `json:"mode"`
+	OperationID *string `json:"operation_id"`
+}
+
+func recordQuotaManageAudit(c *gin.Context, userID int, mode string, value int, oldQuota int) {
+	switch mode {
+	case "add":
+		recordManageAuditFor(c, userID, "user.quota_add", map[string]interface{}{
+			"quota": logger.LogQuota(value),
+		})
+	case "subtract":
+		recordManageAuditFor(c, userID, "user.quota_subtract", map[string]interface{}{
+			"quota": logger.LogQuota(value),
+		})
+	case "override":
+		recordManageAuditFor(c, userID, "user.quota_override", map[string]interface{}{
+			"from": logger.LogQuota(oldQuota),
+			"to":   logger.LogQuota(value),
+		})
+	}
 }
 
 // ManageUser Only admin user can do this
@@ -1182,33 +1201,55 @@ func ManageUser(c *gin.Context) {
 		user.Role = common.RoleCommonUser
 	case "add_quota":
 		var newQuota int
-		switch req.Mode {
-		case "add":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
+		operationID := ""
+		if req.OperationID != nil {
+			operationID = *req.OperationID
+		}
+		if req.OperationID != nil && (strings.TrimSpace(operationID) != operationID || operationID == "" || len(operationID) > model.MaxUserQuotaOperationIDLength) {
+			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			return
+		}
+		if req.Mode != "add" && req.Mode != "subtract" && req.Mode != "override" {
+			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			return
+		}
+		if (req.Mode == "add" || req.Mode == "subtract") && req.Value <= 0 {
+			common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
+			return
+		}
+		if operationID != "" {
+			result, err := model.ApplyUserQuotaOperation(user.Id, req.Mode, req.Value, operationID)
+			if err != nil {
+				if errors.Is(err, model.ErrUserQuotaOperationMismatch) {
+					common.ApiErrorMsg(c, err.Error())
+					return
+				}
+				common.ApiError(c, err)
 				return
 			}
+			newQuota = result.ResultingQuota
+			if !result.Replayed {
+				recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, result.OldQuota)
+			}
+			common.ApiSuccess(c, gin.H{"quota": newQuota})
+			return
+		}
+
+		switch req.Mode {
+		case "add":
 			newQuota, err = model.IncreaseUserQuotaAndGet(user.Id, req.Value)
 			if err != nil {
 				common.ApiError(c, err)
 				return
 			}
-			recordManageAuditFor(c, user.Id, "user.quota_add", map[string]interface{}{
-				"quota": logger.LogQuota(req.Value),
-			})
+			recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, 0)
 		case "subtract":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
-				return
-			}
 			newQuota, err = model.DecreaseUserQuotaAndGet(user.Id, req.Value)
 			if err != nil {
 				common.ApiError(c, err)
 				return
 			}
-			recordManageAuditFor(c, user.Id, "user.quota_subtract", map[string]interface{}{
-				"quota": logger.LogQuota(req.Value),
-			})
+			recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, 0)
 		case "override":
 			oldQuota, resultingQuota, err := model.OverrideUserQuotaAndGet(user.Id, req.Value)
 			if err != nil {
@@ -1216,13 +1257,7 @@ func ManageUser(c *gin.Context) {
 				return
 			}
 			newQuota = resultingQuota
-			recordManageAuditFor(c, user.Id, "user.quota_override", map[string]interface{}{
-				"from": logger.LogQuota(oldQuota),
-				"to":   logger.LogQuota(req.Value),
-			})
-		default:
-			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
-			return
+			recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, oldQuota)
 		}
 		common.ApiSuccess(c, gin.H{"quota": newQuota})
 		return

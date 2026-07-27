@@ -268,6 +268,9 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	if err := migrateUserQuotaOperations(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -390,6 +393,9 @@ func migrateDBFast() error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := migrateUserQuotaOperations(); err != nil {
+		return err
 	}
 	if err := ensureModelUUIDs(); err != nil {
 		return err

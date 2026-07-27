@@ -170,6 +170,35 @@ func TestQuotaAndGetInvalidatesCachedUserAfterCommit(t *testing.T) {
 	assert.False(t, server.Exists(getUserCacheKey(user.Id)))
 }
 
+func TestUserQuotaOperationReplayDoesNotInvalidateCachedUser(t *testing.T) {
+	db := setupUserQuotaTestDB(t)
+	server := useUserQuotaMiniRedis(t)
+	require.NoError(t, migrateUserQuotaOperations())
+	user := User{
+		Username: "quota-operation-cache-replay-user",
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+		Quota:    500,
+		Group:    "default",
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	first, err := ApplyUserQuotaOperation(user.Id, "add", 200, "quota-operation-cache-replay")
+	require.NoError(t, err)
+	assert.False(t, first.Replayed)
+	assert.False(t, server.Exists(getUserCacheKey(user.Id)))
+
+	var updated User
+	require.NoError(t, db.First(&updated, user.Id).Error)
+	require.NoError(t, populateUserCache(updated))
+
+	replay, err := ApplyUserQuotaOperation(user.Id, "add", 200, "quota-operation-cache-replay")
+	require.NoError(t, err)
+	assert.True(t, replay.Replayed)
+	assert.Equal(t, 700, replay.ResultingQuota)
+	assert.True(t, server.Exists(getUserCacheKey(user.Id)))
+}
+
 func TestUserValidationAllowsLongEmailCredentialsForSpace(t *testing.T) {
 	localPart := strings.Repeat("a", 188)
 	email := localPart + "@x.test"
