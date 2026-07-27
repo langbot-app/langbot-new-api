@@ -1084,10 +1084,29 @@ func updateAdminPermissionsForUserInTx(c *gin.Context, tx *gorm.DB, userID int, 
 }
 
 type ManageRequest struct {
-	Id     int    `json:"id"`
-	Action string `json:"action"`
-	Value  int    `json:"value"`
-	Mode   string `json:"mode"`
+	Id          int     `json:"id"`
+	Action      string  `json:"action"`
+	Value       int     `json:"value"`
+	Mode        string  `json:"mode"`
+	OperationID *string `json:"operation_id"`
+}
+
+func recordQuotaManageAudit(c *gin.Context, userID int, mode string, value int, oldQuota int) {
+	switch mode {
+	case "add":
+		recordManageAuditFor(c, userID, "user.quota_add", map[string]interface{}{
+			"quota": logger.LogQuota(value),
+		})
+	case "subtract":
+		recordManageAuditFor(c, userID, "user.quota_subtract", map[string]interface{}{
+			"quota": logger.LogQuota(value),
+		})
+	case "override":
+		recordManageAuditFor(c, userID, "user.quota_override", map[string]interface{}{
+			"from": logger.LogQuota(oldQuota),
+			"to":   logger.LogQuota(value),
+		})
+	}
 }
 
 // ManageUser Only admin user can do this
@@ -1099,11 +1118,22 @@ func ManageUser(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
+	if req.Id <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgUserNotExists)
+		return
+	}
 	user := model.User{
 		Id: req.Id,
 	}
 	// Fill attributes
-	model.DB.Unscoped().Where(&user).First(&user)
+	if err := model.DB.Unscoped().Where(&user).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			common.ApiErrorI18n(c, i18n.MsgUserNotExists)
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
 	if user.Id == 0 {
 		common.ApiErrorI18n(c, i18n.MsgUserNotExists)
 		return
@@ -1170,49 +1200,45 @@ func ManageUser(c *gin.Context) {
 		}
 		user.Role = common.RoleCommonUser
 	case "add_quota":
-		switch req.Mode {
-		case "add":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
-				return
-			}
-			if err := model.IncreaseUserQuota(user.Id, req.Value, true); err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordManageAuditFor(c, user.Id, "user.quota_add", map[string]interface{}{
-				"quota": logger.LogQuota(req.Value),
-			})
-		case "subtract":
-			if req.Value <= 0 {
-				common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
-				return
-			}
-			if err := model.DecreaseUserQuota(user.Id, req.Value, true); err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordManageAuditFor(c, user.Id, "user.quota_subtract", map[string]interface{}{
-				"quota": logger.LogQuota(req.Value),
-			})
-		case "override":
-			oldQuota := user.Quota
-			if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("quota", req.Value).Error; err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordManageAuditFor(c, user.Id, "user.quota_override", map[string]interface{}{
-				"from": logger.LogQuota(oldQuota),
-				"to":   logger.LogQuota(req.Value),
-			})
-		default:
+		if req.OperationID == nil || !model.IsValidUserQuotaOperationID(*req.OperationID) {
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "",
+		operationID := *req.OperationID
+		if req.Mode != "add" && req.Mode != "subtract" && req.Mode != "override" {
+			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			return
+		}
+		if (req.Mode == "add" || req.Mode == "subtract") && req.Value <= 0 {
+			common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
+			return
+		}
+		result, err := model.ApplyUserQuotaOperationWithAudit(user.Id, req.Mode, req.Value, operationID, model.UserQuotaOperationAuditInput{
+			OperatorUserID:   c.GetInt("id"),
+			OperatorUsername: c.GetString("username"),
+			OperatorRole:     c.GetInt("role"),
+			AuthMethod:       auditAuthMethod(c),
+			IP:               c.ClientIP(),
 		})
+		if err != nil {
+			if errors.Is(err, model.ErrUserQuotaOperationMismatch) {
+				common.ApiErrorMsg(c, err.Error())
+				return
+			}
+			common.ApiError(c, err)
+			return
+		}
+		auditHandled, auditErr := model.ReplayUserQuotaOperationAudit(operationID)
+		if auditErr != nil {
+			common.SysLog("failed to replay user quota operation audit: " + auditErr.Error())
+		} else {
+			if auditHandled {
+				markAuditLogged(c)
+			} else if !result.Replayed {
+				recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, result.OldQuota)
+			}
+		}
+		common.ApiSuccess(c, gin.H{"quota": result.ResultingQuota})
 		return
 	default:
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)

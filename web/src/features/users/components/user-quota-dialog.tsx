@@ -1,3 +1,4 @@
+import { nanoid } from 'nanoid'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -30,6 +31,10 @@ import { cn } from '@/lib/utils'
 
 import { adjustUserQuota } from '../api'
 import type { QuotaAdjustMode } from '../types'
+import {
+  buildQuotaDialogPayload,
+  createQuotaDialogOperationState,
+} from './user-quota-operation'
 
 interface UserQuotaDialogProps {
   open: boolean
@@ -44,6 +49,9 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const [mode, setMode] = useState<QuotaAdjustMode>('add')
   const [amount, setAmount] = useState('')
   const [loading, setLoading] = useState(false)
+  const operationStateRef = useRef(
+    createQuotaDialogOperationState(() => `quota_${nanoid()}`)
+  )
 
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
@@ -69,24 +77,32 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
     }
   }
 
+  const resetQuotaDialogDraft = () => {
+    setAmount('')
+    setMode('add')
+    operationStateRef.current.reset()
+  }
+
   const handleConfirm = async () => {
     if (!amount && mode !== 'override') return
     if (quotaValue <= 0 && mode !== 'override') return
 
     setLoading(true)
     try {
-      const value =
-        mode === 'override' ? parseQuotaFromDollars(amountValue) : quotaValue
-      const result = await adjustUserQuota({
-        id: props.userId,
-        action: 'add_quota',
-        mode,
-        value: mode === 'override' ? value : Math.abs(value),
-      })
+      const result = await adjustUserQuota(
+        buildQuotaDialogPayload({
+          userId: props.userId,
+          mode,
+          value:
+            mode === 'override'
+              ? parseQuotaFromDollars(amountValue)
+              : quotaValue,
+          operationState: operationStateRef.current,
+        })
+      )
       if (result.success) {
         toast.success(t('Quota adjusted successfully'))
-        setAmount('')
-        setMode('add')
+        resetQuotaDialogDraft()
         props.onOpenChange(false)
         props.onSuccess()
       } else {
@@ -100,9 +116,15 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   }
 
   const handleCancel = () => {
-    setAmount('')
-    setMode('add')
+    resetQuotaDialogDraft()
     props.onOpenChange(false)
+  }
+
+  const handleOpenChange = (open: boolean) => {
+    if (!open) {
+      resetQuotaDialogDraft()
+    }
+    props.onOpenChange(open)
   }
 
   const placeholder = tokensOnly
@@ -112,7 +134,7 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   return (
     <Dialog
       open={props.open}
-      onOpenChange={props.onOpenChange}
+      onOpenChange={handleOpenChange}
       title={t('Adjust Quota')}
       description={t('Select an operation mode and enter the amount')}
       contentHeight='auto'
@@ -147,6 +169,7 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
                 onClick={() => {
                   setMode(m)
                   setAmount('')
+                  operationStateRef.current.reset()
                 }}
               >
                 {m === 'add'
@@ -169,7 +192,10 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
             min={mode === 'override' ? undefined : 0}
             placeholder={placeholder}
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+            onChange={(e) => {
+              setAmount(e.target.value)
+              operationStateRef.current.reset()
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleConfirm()
             }}
