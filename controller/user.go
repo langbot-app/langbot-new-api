@@ -1218,7 +1218,13 @@ func ManageUser(c *gin.Context) {
 			return
 		}
 		if operationID != "" {
-			result, err := model.ApplyUserQuotaOperation(user.Id, req.Mode, req.Value, operationID)
+			result, err := model.ApplyUserQuotaOperationWithAudit(user.Id, req.Mode, req.Value, operationID, model.UserQuotaOperationAuditInput{
+				OperatorUserID:   c.GetInt("id"),
+				OperatorUsername: c.GetString("username"),
+				OperatorRole:     c.GetInt("role"),
+				AuthMethod:       auditAuthMethod(c),
+				IP:               c.ClientIP(),
+			})
 			if err != nil {
 				if errors.Is(err, model.ErrUserQuotaOperationMismatch) {
 					common.ApiErrorMsg(c, err.Error())
@@ -1228,7 +1234,14 @@ func ManageUser(c *gin.Context) {
 				return
 			}
 			newQuota = result.ResultingQuota
-			if !result.Replayed {
+			auditHandled, auditErr := model.ReplayUserQuotaOperationAudit(operationID)
+			if auditErr != nil {
+				common.ApiError(c, auditErr)
+				return
+			}
+			if auditHandled {
+				markAuditLogged(c)
+			} else if !result.Replayed {
 				recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, result.OldQuota)
 			}
 			common.ApiSuccess(c, gin.H{"quota": newQuota})

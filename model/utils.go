@@ -49,6 +49,14 @@ func addNewRecord(type_ int, id int, value int) {
 	}
 }
 
+func drainBatchUpdateRecord(type_ int, id int) int {
+	batchUpdateLocks[type_].Lock()
+	defer batchUpdateLocks[type_].Unlock()
+	value := batchUpdateStores[type_][id]
+	delete(batchUpdateStores[type_], id)
+	return value
+}
+
 func batchUpdate() {
 	// check if there's any data to update
 	hasData := false
@@ -107,7 +115,26 @@ func batchUpdate() {
 		userIDs[key] = struct{}{}
 	}
 	for key := range userIDs {
-		updateUserQuotaUsedQuotaAndRequestCount(key, userQuotaStore[key], usedQuotaStore[key], requestCountStore[key])
+		quotaDelta := userQuotaStore[key]
+		if err := updateUserQuotaUsedQuotaAndRequestCount(key, quotaDelta, usedQuotaStore[key], requestCountStore[key]); err != nil {
+			common.SysLog("failed to batch update user quota, used quota and request count: " + err.Error())
+			if quotaDelta != 0 {
+				addNewRecord(BatchUpdateTypeUserQuota, key, quotaDelta)
+			}
+			if usedQuotaStore[key] != 0 {
+				addNewRecord(BatchUpdateTypeUsedQuota, key, usedQuotaStore[key])
+			}
+			if requestCountStore[key] != 0 {
+				addNewRecord(BatchUpdateTypeRequestCount, key, requestCountStore[key])
+			}
+			continue
+		}
+		if quotaDelta != 0 {
+			if err := addUserQuotaPendingDelta(key, -quotaDelta); err != nil {
+				common.SysLog("failed to clear pending user quota delta: " + err.Error())
+			}
+			invalidateUserQuotaCacheAfterMutation(key)
+		}
 	}
 	common.SysLog("batch update finished")
 }

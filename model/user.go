@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -1149,6 +1150,11 @@ func GetUserQuota(id int, fromDB bool) (quota int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	if pending, pendingErr := getUserQuotaPendingDelta(id); pendingErr == nil {
+		quota += pending
+	} else {
+		common.SysLog("failed to load pending user quota delta: " + pendingErr.Error())
+	}
 
 	return quota, nil
 }
@@ -1233,17 +1239,30 @@ func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
+	if !db && common.BatchUpdateEnabled {
+		if err := addUserQuotaPendingDelta(id, quota); err != nil {
+			common.SysLog("failed to publish pending user quota delta: " + err.Error())
+			return increaseUserQuota(id, quota)
+		}
+		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
+		gopool.Go(func() {
+			err := cacheIncrUserQuota(id, int64(quota))
+			if err != nil {
+				common.SysLog("failed to increase user quota: " + err.Error())
+			}
+		})
+		return nil
+	}
+	if err := increaseUserQuota(id, quota); err != nil {
+		return err
+	}
 	gopool.Go(func() {
 		err := cacheIncrUserQuota(id, int64(quota))
 		if err != nil {
 			common.SysLog("failed to increase user quota: " + err.Error())
 		}
 	})
-	if !db && common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
-		return nil
-	}
-	return increaseUserQuota(id, quota)
+	return nil
 }
 
 func IncreaseUserQuotaAndGet(id int, quota int) (int, error) {
@@ -1300,6 +1319,9 @@ func OverrideUserQuotaAndGet(id int, quota int) (oldQuota int, newQuota int, err
 	if quota < 0 {
 		return 0, 0, errors.New("quota 不能为负数！")
 	}
+	if err := flushPendingUserQuotaForAuthoritativeMutation(id); err != nil {
+		return 0, 0, err
+	}
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		var user User
 		if err := lockForUpdate(tx).Select("id", "quota").Where("id = ?", id).First(&user).Error; err != nil {
@@ -1324,6 +1346,9 @@ func OverrideUserQuotaAndGet(id int, quota int) (oldQuota int, newQuota int, err
 }
 
 func deltaUserQuotaAndGet(id int, delta int) (int, error) {
+	if err := flushPendingUserQuotaForAuthoritativeMutation(id); err != nil {
+		return 0, err
+	}
 	var newQuota int
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		query := tx.Model(&User{}).Where("id = ?", id)
@@ -1366,6 +1391,74 @@ func invalidateUserQuotaCacheAfterMutation(id int) {
 	if err := invalidateUserCache(id); err != nil {
 		common.SysLog("failed to invalidate user cache after quota mutation: " + err.Error())
 	}
+}
+
+func getUserQuotaPendingKey(userId int) string {
+	return fmt.Sprintf("user:quota:pending:%d", userId)
+}
+
+func userQuotaPendingTTLSeconds() int {
+	ttl := userCacheTTLSeconds() * 2
+	batchTTL := common.BatchUpdateInterval*2 + 60
+	if batchTTL > ttl {
+		ttl = batchTTL
+	}
+	if ttl <= 0 {
+		return 120
+	}
+	return ttl
+}
+
+func addUserQuotaPendingDelta(id int, delta int) error {
+	if !common.RedisEnabled || delta == 0 {
+		return nil
+	}
+	const script = `
+local value = redis.call('INCRBY', KEYS[1], ARGV[1])
+if tonumber(value) == 0 then
+  redis.call('DEL', KEYS[1])
+else
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return value`
+	return common.RDB.Eval(context.Background(), script, []string{getUserQuotaPendingKey(id)}, delta, userQuotaPendingTTLSeconds()).Err()
+}
+
+func getUserQuotaPendingDelta(id int) (int, error) {
+	if !common.RedisEnabled {
+		return 0, nil
+	}
+	value, err := common.RedisGet(getUserQuotaPendingKey(id))
+	if err != nil {
+		return 0, nil
+	}
+	pending, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, err
+	}
+	return pending, nil
+}
+
+func flushPendingUserQuotaForAuthoritativeMutation(id int) error {
+	pending := drainBatchUpdateRecord(BatchUpdateTypeUserQuota, id)
+	if pending != 0 {
+		if err := updateUserQuotaUsedQuotaAndRequestCount(id, pending, 0, 0); err != nil {
+			addNewRecord(BatchUpdateTypeUserQuota, id, pending)
+			return err
+		}
+		if err := addUserQuotaPendingDelta(id, -pending); err != nil {
+			common.SysLog("failed to clear flushed pending user quota delta: " + err.Error())
+		}
+		invalidateUserQuotaCacheAfterMutation(id)
+	}
+	remaining, err := getUserQuotaPendingDelta(id)
+	if err != nil {
+		return err
+	}
+	if remaining != 0 {
+		return fmt.Errorf("user quota has pending batched delta; retry after quota batch flush")
+	}
+	return nil
 }
 
 func DeltaUpdateUserQuota(id int, delta int) (err error) {
@@ -1422,9 +1515,9 @@ func updateUserUsedQuotaAndRequestCount(id int, quota int, count int) {
 	//}
 }
 
-func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, requestCount int) {
+func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, requestCount int) error {
 	if quota == 0 && usedQuota == 0 && requestCount == 0 {
-		return
+		return nil
 	}
 
 	tx := DB.Model(&User{}).Where("id = ?", id)
@@ -1439,12 +1532,12 @@ func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, r
 		},
 	)
 	if result.Error != nil {
-		common.SysLog("failed to batch update user quota, used quota and request count: " + result.Error.Error())
-		return
+		return result.Error
 	}
 	if quota < 0 && result.RowsAffected == 0 {
-		common.SysLog(fmt.Sprintf("failed to batch decrease user quota for user %d: insufficient quota, attempted to decrease by %s", id, logger.FormatQuota(-quota)))
+		return fmt.Errorf("failed to batch decrease user quota for user %d: insufficient quota, attempted to decrease by %s", id, logger.FormatQuota(-quota))
 	}
+	return nil
 }
 
 func updateUserUsedQuota(id int, quota int) {

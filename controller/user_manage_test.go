@@ -48,6 +48,24 @@ func setupManageUserTestDB(t *testing.T) *gorm.DB {
 		updated_at bigint,
 		PRIMARY KEY (operation_id)
 	)`).Error)
+	require.NoError(t, db.Exec(`CREATE TABLE user_quota_operation_audits (
+		operation_id varchar(128) NOT NULL,
+		operator_user_id integer NOT NULL,
+		operator_username varchar(200) NOT NULL,
+		operator_role integer NOT NULL,
+		auth_method varchar(32) NOT NULL,
+		ip varchar(64) NOT NULL,
+		target_user_id integer NOT NULL,
+		mode varchar(16) NOT NULL,
+		value integer NOT NULL,
+		old_quota integer NOT NULL,
+		resulting_quota integer NOT NULL,
+		log_request_id varchar(191) NOT NULL,
+		logged_at bigint NOT NULL DEFAULT 0,
+		created_at bigint,
+		updated_at bigint,
+		PRIMARY KEY (operation_id)
+	)`).Error)
 
 	t.Cleanup(func() {
 		model.DB, model.LOG_DB = previousDB, previousLogDB
@@ -319,6 +337,42 @@ func TestManageUserQuotaOperationIdConcurrentSameOperationAppliesOnce(t *testing
 	var auditCount int64
 	require.NoError(t, db.Model(&model.Log{}).Where("type = ?", model.LogTypeManage).Count(&auditCount).Error)
 	assert.EqualValues(t, 1, auditCount)
+}
+
+func TestManageUserQuotaOperationAuditOutboxReplayAfterQuotaOperationCommitRecordsExactlyOnce(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-audit-replay-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	_, err := model.ApplyUserQuotaOperationWithAudit(user.Id, "add", 250, "quota-op-audit-replay", model.UserQuotaOperationAuditInput{
+		OperatorUserID:   9999,
+		OperatorUsername: "root-operator",
+		OperatorRole:     common.RoleRootUser,
+		AuthMethod:       "session",
+		IP:               "192.0.2.10",
+	})
+	require.NoError(t, err)
+
+	var auditCount int64
+	require.NoError(t, db.Model(&model.Log{}).Where("type = ?", model.LogTypeManage).Count(&auditCount).Error)
+	require.EqualValues(t, 0, auditCount)
+
+	body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-audit-replay"}`, user.Id)
+	firstReplay := performManageUserRequest(t, body)
+	secondReplay := performManageUserRequest(t, body)
+	assert.Contains(t, firstReplay.Body.String(), `"success":true`)
+	assert.Contains(t, secondReplay.Body.String(), `"success":true`)
+
+	require.NoError(t, db.Model(&model.Log{}).Where("type = ?", model.LogTypeManage).Count(&auditCount).Error)
+	assert.EqualValues(t, 1, auditCount)
+
+	var auditLog model.Log
+	require.NoError(t, db.Where("type = ?", model.LogTypeManage).First(&auditLog).Error)
+	assert.Equal(t, "quota-op-audit-replay", auditLog.RequestId)
+	assert.Contains(t, auditLog.Content, "Increased user quota")
 }
 
 func TestManageUserQuotaOperationIdRejectsMismatchedReplay(t *testing.T) {

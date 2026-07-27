@@ -271,6 +271,9 @@ func migrateDB() error {
 	if err := migrateUserQuotaOperations(); err != nil {
 		return err
 	}
+	if err := migrateUserQuotaOperationAudits(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -395,6 +398,9 @@ func migrateDBFast() error {
 		}
 	}
 	if err := migrateUserQuotaOperations(); err != nil {
+		return err
+	}
+	if err := migrateUserQuotaOperationAudits(); err != nil {
 		return err
 	}
 	if err := ensureModelUUIDs(); err != nil {

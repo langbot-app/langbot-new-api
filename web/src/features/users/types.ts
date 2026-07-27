@@ -143,6 +143,7 @@ export interface ManageUserQuotaPayload {
   action: 'add_quota'
   mode: QuotaAdjustMode
   value: number
+  operation_id?: string
 }
 
 // ============================================================================

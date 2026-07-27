@@ -77,6 +77,11 @@ func populateUserCache(user User) error {
 	if !common.RedisEnabled {
 		return nil
 	}
+	if pending, err := getUserQuotaPendingDelta(user.Id); err == nil {
+		user.Quota += pending
+	} else {
+		common.SysLog("failed to apply pending user quota delta to cache populate: " + err.Error())
+	}
 	return writeUserCache(user.ToBaseUser(), true)
 }
 
@@ -106,11 +111,16 @@ func GetUserCache(userId int) (*UserBase, error) {
 		return nil, err
 	}
 	if common.RedisEnabled {
+		if pending, pendingErr := getUserQuotaPendingDelta(userId); pendingErr == nil {
+			user.Quota += pending
+		} else {
+			common.SysLog("failed to apply pending user quota delta to user cache: " + pendingErr.Error())
+		}
 		floor, floorErr := getUserAuthVersionFloor(userId)
 		if floorErr == nil && floor > user.AuthVersion {
 			return nil, ErrUserAuthCachePending
 		}
-		if err := populateUserCache(*user); err != nil {
+		if err := writeUserCache(user.ToBaseUser(), true); err != nil {
 			if errors.Is(err, ErrUserAuthCachePending) {
 				return nil, err
 			}
@@ -123,6 +133,11 @@ func GetUserCache(userId int) (*UserBase, error) {
 func cacheGetUserBase(userId int) (*UserBase, error) {
 	if !common.RedisEnabled {
 		return nil, fmt.Errorf("redis is not enabled")
+	}
+	if pending, err := getUserQuotaPendingDelta(userId); err != nil {
+		return nil, err
+	} else if pending != 0 {
+		return nil, fmt.Errorf("user quota has pending batch delta")
 	}
 	var userCache UserBase
 	// Try getting from Redis first

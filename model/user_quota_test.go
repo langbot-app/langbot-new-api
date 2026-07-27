@@ -170,6 +170,64 @@ func TestQuotaAndGetInvalidatesCachedUserAfterCommit(t *testing.T) {
 	assert.False(t, server.Exists(getUserCacheKey(user.Id)))
 }
 
+func TestBatchedUserQuotaPendingDeltaPreventsStaleCacheRebuildBeforeFlush(t *testing.T) {
+	db := setupUserQuotaTestDB(t)
+	useUserQuotaMiniRedis(t)
+	previousBatchUpdateEnabled := common.BatchUpdateEnabled
+	common.BatchUpdateEnabled = true
+	t.Cleanup(func() { common.BatchUpdateEnabled = previousBatchUpdateEnabled })
+
+	user := User{
+		Username: "quota-pending-cache-rebuild-user",
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+		Quota:    500,
+		Group:    "default",
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	require.NoError(t, IncreaseUserQuota(user.Id, 200, false))
+
+	cache, err := GetUserCache(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 700, cache.Quota)
+
+	batchUpdate()
+	cache, err = GetUserCache(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 700, cache.Quota)
+}
+
+func TestApplyUserQuotaOperationFlushesPendingBatchedDeltaBeforeAuthoritativeMutation(t *testing.T) {
+	db := setupUserQuotaTestDB(t)
+	useUserQuotaMiniRedis(t)
+	require.NoError(t, migrateUserQuotaOperations())
+	previousBatchUpdateEnabled := common.BatchUpdateEnabled
+	common.BatchUpdateEnabled = true
+	t.Cleanup(func() { common.BatchUpdateEnabled = previousBatchUpdateEnabled })
+
+	user := User{
+		Username: "quota-operation-flushes-pending-user",
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+		Quota:    500,
+		Group:    "default",
+	}
+	require.NoError(t, db.Create(&user).Error)
+	require.NoError(t, IncreaseUserQuota(user.Id, 200, false))
+
+	result, err := ApplyUserQuotaOperation(user.Id, "add", 50, "quota-operation-flushes-pending")
+	require.NoError(t, err)
+	assert.False(t, result.Replayed)
+	assert.Equal(t, 700, result.OldQuota)
+	assert.Equal(t, 750, result.ResultingQuota)
+
+	batchUpdate()
+	var updated User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 750, updated.Quota)
+}
+
 func TestUserQuotaOperationReplayDoesNotInvalidateCachedUser(t *testing.T) {
 	db := setupUserQuotaTestDB(t)
 	server := useUserQuotaMiniRedis(t)
