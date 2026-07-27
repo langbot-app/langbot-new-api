@@ -197,7 +197,7 @@ func TestManageUserQuotaReturnsAuthoritativeDataObject(t *testing.T) {
 	}
 	require.NoError(t, db.Create(&user).Error)
 
-	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250}`, user.Id))
+	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-authoritative-data"}`, user.Id))
 	assert.Equal(t, http.StatusOK, recorder.Code)
 
 	var response struct {
@@ -269,7 +269,7 @@ func TestManageUserQuotaOperationIdReplayDoesNotUseCurrentQuotaOrAudit(t *testin
 	first := performManageUserRequest(t, body)
 	assert.Contains(t, first.Body.String(), `"success":true`)
 
-	unrelated := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":100}`, user.Id))
+	unrelated := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":100,"operation_id":"quota-op-unrelated-change"}`, user.Id))
 	assert.Contains(t, unrelated.Body.String(), `"success":true`)
 
 	replay := performManageUserRequest(t, body)
@@ -371,7 +371,8 @@ func TestManageUserQuotaOperationAuditOutboxReplayAfterQuotaOperationCommitRecor
 
 	var auditLog model.Log
 	require.NoError(t, db.Where("type = ?", model.LogTypeManage).First(&auditLog).Error)
-	assert.Equal(t, "quota-op-audit-replay", auditLog.RequestId)
+	assert.NotEqual(t, "quota-op-audit-replay", auditLog.RequestId)
+	assert.True(t, strings.HasPrefix(auditLog.RequestId, "quotaop_v1_"))
 	assert.Contains(t, auditLog.Content, "Increased user quota")
 }
 
@@ -408,6 +409,7 @@ func TestManageUserQuotaOperationIdValidation(t *testing.T) {
 	require.NoError(t, db.Create(&user).Error)
 
 	bodies := []string{
+		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250}`, user.Id),
 		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":""}`, user.Id),
 		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":"   "}`, user.Id),
 		fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"add","value":250,"operation_id":" quota-op-spaced"}`, user.Id),
@@ -424,6 +426,29 @@ func TestManageUserQuotaOperationIdValidation(t *testing.T) {
 	assert.Equal(t, 1000, updated.Quota)
 }
 
+func TestManageUserQuotaRequiresOperationIdForEveryMode(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "managed-quota-operation-id-required-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	for _, mode := range []string{"add", "subtract", "override"} {
+		recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"%s","value":100}`, user.Id, mode))
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), `"success":false`)
+	}
+
+	var updated model.User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 1000, updated.Quota)
+
+	var operationCount int64
+	require.NoError(t, db.Model(&model.UserQuotaOperation{}).Count(&operationCount).Error)
+	assert.EqualValues(t, 0, operationCount)
+}
+
 func TestManageUserQuotaRejectsNegativeOverride(t *testing.T) {
 	db := setupManageUserTestDB(t)
 	user := model.User{
@@ -432,7 +457,7 @@ func TestManageUserQuotaRejectsNegativeOverride(t *testing.T) {
 	}
 	require.NoError(t, db.Create(&user).Error)
 
-	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"override","value":-1}`, user.Id))
+	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"override","value":-1,"operation_id":"quota-op-negative-override"}`, user.Id))
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), `"success":false`)
 
@@ -449,11 +474,11 @@ func TestManageUserQuotaRejectsMissingUser(t *testing.T) {
 	}
 	require.NoError(t, db.Create(&user).Error)
 
-	recorder := performManageUserRequest(t, `{"id":404,"action":"add_quota","mode":"add","value":250}`)
+	recorder := performManageUserRequest(t, `{"id":404,"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-missing-user"}`)
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), `"success":false`)
 
-	recorder = performManageUserRequest(t, `{"action":"add_quota","mode":"add","value":250}`)
+	recorder = performManageUserRequest(t, `{"action":"add_quota","mode":"add","value":250,"operation_id":"quota-op-missing-id"}`)
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), `"success":false`)
 

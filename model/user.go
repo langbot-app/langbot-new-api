@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -1430,7 +1431,10 @@ func getUserQuotaPendingDelta(id int) (int, error) {
 	}
 	value, err := common.RedisGet(getUserQuotaPendingKey(id))
 	if err != nil {
-		return 0, nil
+		if errors.Is(err, redis.Nil) {
+			return 0, nil
+		}
+		return 0, err
 	}
 	pending, err := strconv.Atoi(value)
 	if err != nil {

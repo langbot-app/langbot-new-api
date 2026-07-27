@@ -1,8 +1,12 @@
 package model
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
@@ -14,11 +18,13 @@ import (
 )
 
 const MaxUserQuotaOperationIDLength = 128
+const userQuotaOperationAuditRequestIDPrefix = "quotaop_v1_"
+const userQuotaOperationAuditRecoveryBatchSize = 100
 
 var ErrUserQuotaOperationInvalid = errors.New("quota operation_id is invalid")
 var ErrUserQuotaOperationMismatch = errors.New("quota operation_id was already used with different parameters")
 
-var userQuotaOperationAuditLocks sync.Map
+var userQuotaOperationAuditLocks [64]sync.Mutex
 
 type UserQuotaOperation struct {
 	OperationID    string `json:"operation_id" gorm:"column:operation_id;primaryKey;type:varchar(128)"`
@@ -75,7 +81,7 @@ func ApplyUserQuotaOperation(userID int, mode string, value int, operationID str
 }
 
 func ApplyUserQuotaOperationWithAudit(userID int, mode string, value int, operationID string, audit UserQuotaOperationAuditInput) (UserQuotaOperationResult, error) {
-	if strings.TrimSpace(operationID) != operationID || operationID == "" || len(operationID) > MaxUserQuotaOperationIDLength {
+	if !IsValidUserQuotaOperationID(operationID) {
 		return UserQuotaOperationResult{}, ErrUserQuotaOperationInvalid
 	}
 
@@ -215,21 +221,30 @@ func applyUserQuotaOperationOnce(userID int, mode string, value int, operationID
 }
 
 func quotaOperationAuditRequestID(operationID string) string {
-	if len(operationID) <= 64 {
-		return operationID
+	sum := sha256.Sum256([]byte(operationID))
+	return userQuotaOperationAuditRequestIDPrefix + base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func IsValidUserQuotaOperationID(operationID string) bool {
+	if operationID == "" || len(operationID) > MaxUserQuotaOperationIDLength {
+		return false
 	}
-	return "quota-op-" + common.Sha1([]byte(operationID))[:32]
+	return strings.TrimSpace(operationID) == operationID
 }
 
 func ReplayUserQuotaOperationAudit(operationID string) (bool, error) {
-	if strings.TrimSpace(operationID) != operationID || operationID == "" || len(operationID) > MaxUserQuotaOperationIDLength {
+	return replayUserQuotaOperationAudit(context.Background(), operationID)
+}
+
+func replayUserQuotaOperationAudit(ctx context.Context, operationID string) (bool, error) {
+	if !IsValidUserQuotaOperationID(operationID) {
 		return false, ErrUserQuotaOperationInvalid
 	}
 	lock := userQuotaOperationAuditLock(operationID)
 	lock.Lock()
 	defer lock.Unlock()
 	var handled bool
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	err := DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var audit UserQuotaOperationAudit
 		err := lockForUpdate(tx).Where("operation_id = ?", operationID).First(&audit).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -242,12 +257,16 @@ func ReplayUserQuotaOperationAudit(operationID string) (bool, error) {
 			handled = true
 			return nil
 		}
+		logDB := LOG_DB.WithContext(ctx)
+		if LOG_DB == DB {
+			logDB = tx
+		}
 		var existingCount int64
-		if err := LOG_DB.Model(&Log{}).Where("type = ? AND request_id = ?", LogTypeManage, audit.LogRequestID).Count(&existingCount).Error; err != nil {
+		if err := logDB.Model(&Log{}).Where("type = ? AND request_id = ?", LogTypeManage, audit.LogRequestID).Count(&existingCount).Error; err != nil {
 			return err
 		}
 		if existingCount == 0 {
-			if err := createLog(buildUserQuotaOperationAuditLog(audit)); err != nil {
+			if err := logDB.Create(buildUserQuotaOperationAuditLog(audit)).Error; err != nil {
 				return err
 			}
 		}
@@ -264,8 +283,84 @@ func ReplayUserQuotaOperationAudit(operationID string) (bool, error) {
 }
 
 func userQuotaOperationAuditLock(operationID string) *sync.Mutex {
-	lock, _ := userQuotaOperationAuditLocks.LoadOrStore(operationID, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(operationID))
+	return &userQuotaOperationAuditLocks[int(hasher.Sum32())%len(userQuotaOperationAuditLocks)]
+}
+
+func RecoverPendingUserQuotaOperationAudits(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 || limit > userQuotaOperationAuditRecoveryBatchSize {
+		limit = userQuotaOperationAuditRecoveryBatchSize
+	}
+	var audits []UserQuotaOperationAudit
+	if err := DB.WithContext(ctx).
+		Where("logged_at = ?", 0).
+		Order("created_at asc, operation_id asc").
+		Limit(limit).
+		Find(&audits).Error; err != nil {
+		return 0, err
+	}
+	recovered := 0
+	for _, audit := range audits {
+		if err := ctx.Err(); err != nil {
+			return recovered, err
+		}
+		handled, err := replayUserQuotaOperationAudit(ctx, audit.OperationID)
+		if err != nil {
+			return recovered, err
+		}
+		if handled {
+			recovered++
+		}
+	}
+	return recovered, nil
+}
+
+func StartUserQuotaOperationAuditRecovery(ctx context.Context, interval time.Duration) <-chan struct{} {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		backoff := interval
+		for {
+			recovered, err := RecoverPendingUserQuotaOperationAudits(ctx, userQuotaOperationAuditRecoveryBatchSize)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logger.LogWarn(ctx, fmt.Sprintf("user quota operation audit recovery failed: %v", err))
+				if !waitUserQuotaOperationAuditRecovery(ctx, backoff) {
+					return
+				}
+				backoff *= 2
+				if backoff > 5*time.Minute {
+					backoff = 5 * time.Minute
+				}
+				continue
+			}
+			backoff = interval
+			if recovered >= userQuotaOperationAuditRecoveryBatchSize {
+				continue
+			}
+			if !waitUserQuotaOperationAuditRecovery(ctx, interval) {
+				return
+			}
+		}
+	}()
+	return done
+}
+
+func waitUserQuotaOperationAuditRecovery(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func buildUserQuotaOperationAuditLog(audit UserQuotaOperationAudit) *Log {
@@ -280,10 +375,9 @@ func buildUserQuotaOperationAuditLog(audit UserQuotaOperationAudit) *Log {
 		"op":         buildOpField(action, params),
 		"admin_info": adminInfo,
 	}
-	username, _ := GetUsernameById(audit.OperatorUserID, false)
 	return &Log{
 		UserId:    audit.OperatorUserID,
-		Username:  username,
+		Username:  audit.OperatorUsername,
 		CreatedAt: common.GetTimestamp(),
 		Type:      LogTypeManage,
 		Content:   content,

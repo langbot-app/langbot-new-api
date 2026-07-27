@@ -34,7 +34,7 @@ func setupUserQuotaTestDB(t *testing.T) *gorm.DB {
 	sqlDB.SetMaxOpenConns(1)
 	DB = db
 	LOG_DB = db
-	require.NoError(t, db.AutoMigrate(&User{}))
+	require.NoError(t, db.AutoMigrate(&User{}, &Log{}))
 
 	t.Cleanup(func() {
 		DB, LOG_DB = previousDB, previousLogDB
@@ -196,6 +196,67 @@ func TestBatchedUserQuotaPendingDeltaPreventsStaleCacheRebuildBeforeFlush(t *tes
 	cache, err = GetUserCache(user.Id)
 	require.NoError(t, err)
 	assert.Equal(t, 700, cache.Quota)
+}
+
+func TestGetUserQuotaPendingDeltaMissingKeyIsZero(t *testing.T) {
+	useUserQuotaMiniRedis(t)
+
+	pending, err := getUserQuotaPendingDelta(12345)
+	require.NoError(t, err)
+	assert.Zero(t, pending)
+}
+
+func TestGetUserQuotaPendingDeltaRedisFailureFailsClosed(t *testing.T) {
+	server := useUserQuotaMiniRedis(t)
+	server.Close()
+
+	pending, err := getUserQuotaPendingDelta(12345)
+	require.Error(t, err)
+	assert.Zero(t, pending)
+}
+
+func TestApplyUserQuotaOperationFailsClosedWhenRedisPendingDeltaCannotBeParsed(t *testing.T) {
+	db := setupUserQuotaTestDB(t)
+	server := useUserQuotaMiniRedis(t)
+	require.NoError(t, migrateUserQuotaOperations())
+	user := User{
+		Username: "quota-operation-pending-parse-user",
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+		Quota:    500,
+		Group:    "default",
+	}
+	require.NoError(t, db.Create(&user).Error)
+	server.Set(getUserQuotaPendingKey(user.Id), "not-an-int")
+
+	_, err := ApplyUserQuotaOperation(user.Id, "add", 50, "quota-operation-pending-parse")
+	require.Error(t, err)
+
+	var updated User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 500, updated.Quota)
+}
+
+func TestApplyUserQuotaOperationFailsClosedWhenRedisPendingDeltaInterleaves(t *testing.T) {
+	db := setupUserQuotaTestDB(t)
+	server := useUserQuotaMiniRedis(t)
+	require.NoError(t, migrateUserQuotaOperations())
+	user := User{
+		Username: "quota-operation-pending-interleave-user",
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+		Quota:    500,
+		Group:    "default",
+	}
+	require.NoError(t, db.Create(&user).Error)
+	server.Set(getUserQuotaPendingKey(user.Id), "25")
+
+	_, err := ApplyUserQuotaOperation(user.Id, "add", 50, "quota-operation-pending-interleave")
+	require.Error(t, err)
+
+	var updated User
+	require.NoError(t, db.Select("quota").First(&updated, user.Id).Error)
+	assert.Equal(t, 500, updated.Quota)
 }
 
 func TestApplyUserQuotaOperationFlushesPendingBatchedDeltaBeforeAuthoritativeMutation(t *testing.T) {

@@ -1200,15 +1200,11 @@ func ManageUser(c *gin.Context) {
 		}
 		user.Role = common.RoleCommonUser
 	case "add_quota":
-		var newQuota int
-		operationID := ""
-		if req.OperationID != nil {
-			operationID = *req.OperationID
-		}
-		if req.OperationID != nil && (strings.TrimSpace(operationID) != operationID || operationID == "" || len(operationID) > model.MaxUserQuotaOperationIDLength) {
+		if req.OperationID == nil || !model.IsValidUserQuotaOperationID(*req.OperationID) {
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 			return
 		}
+		operationID := *req.OperationID
 		if req.Mode != "add" && req.Mode != "subtract" && req.Mode != "override" {
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 			return
@@ -1217,62 +1213,32 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgUserQuotaChangeZero)
 			return
 		}
-		if operationID != "" {
-			result, err := model.ApplyUserQuotaOperationWithAudit(user.Id, req.Mode, req.Value, operationID, model.UserQuotaOperationAuditInput{
-				OperatorUserID:   c.GetInt("id"),
-				OperatorUsername: c.GetString("username"),
-				OperatorRole:     c.GetInt("role"),
-				AuthMethod:       auditAuthMethod(c),
-				IP:               c.ClientIP(),
-			})
-			if err != nil {
-				if errors.Is(err, model.ErrUserQuotaOperationMismatch) {
-					common.ApiErrorMsg(c, err.Error())
-					return
-				}
-				common.ApiError(c, err)
+		result, err := model.ApplyUserQuotaOperationWithAudit(user.Id, req.Mode, req.Value, operationID, model.UserQuotaOperationAuditInput{
+			OperatorUserID:   c.GetInt("id"),
+			OperatorUsername: c.GetString("username"),
+			OperatorRole:     c.GetInt("role"),
+			AuthMethod:       auditAuthMethod(c),
+			IP:               c.ClientIP(),
+		})
+		if err != nil {
+			if errors.Is(err, model.ErrUserQuotaOperationMismatch) {
+				common.ApiErrorMsg(c, err.Error())
 				return
 			}
-			newQuota = result.ResultingQuota
-			auditHandled, auditErr := model.ReplayUserQuotaOperationAudit(operationID)
-			if auditErr != nil {
-				common.ApiError(c, auditErr)
-				return
-			}
+			common.ApiError(c, err)
+			return
+		}
+		auditHandled, auditErr := model.ReplayUserQuotaOperationAudit(operationID)
+		if auditErr != nil {
+			common.SysLog("failed to replay user quota operation audit: " + auditErr.Error())
+		} else {
 			if auditHandled {
 				markAuditLogged(c)
 			} else if !result.Replayed {
 				recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, result.OldQuota)
 			}
-			common.ApiSuccess(c, gin.H{"quota": newQuota})
-			return
 		}
-
-		switch req.Mode {
-		case "add":
-			newQuota, err = model.IncreaseUserQuotaAndGet(user.Id, req.Value)
-			if err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, 0)
-		case "subtract":
-			newQuota, err = model.DecreaseUserQuotaAndGet(user.Id, req.Value)
-			if err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, 0)
-		case "override":
-			oldQuota, resultingQuota, err := model.OverrideUserQuotaAndGet(user.Id, req.Value)
-			if err != nil {
-				common.ApiError(c, err)
-				return
-			}
-			newQuota = resultingQuota
-			recordQuotaManageAudit(c, user.Id, req.Mode, req.Value, oldQuota)
-		}
-		common.ApiSuccess(c, gin.H{"quota": newQuota})
+		common.ApiSuccess(c, gin.H{"quota": result.ResultingQuota})
 		return
 	default:
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)

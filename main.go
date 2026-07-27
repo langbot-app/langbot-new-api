@@ -60,6 +60,8 @@ func main() {
 	if common.DebugEnabled {
 		common.SysLog("running in debug mode")
 	}
+	backgroundCtx, stopBackgroundTasks := context.WithCancel(context.Background())
+	defer stopBackgroundTasks()
 
 	defer func() {
 		err := model.CloseDB()
@@ -143,6 +145,7 @@ func main() {
 	// switch are enforced inside the runner and each handler's Enabled().
 	controller.RegisterScheduledSystemTasks()
 	service.StartSystemTaskRunner()
+	quotaAuditRecoveryDone := model.StartUserQuotaOperationAuditRecovery(backgroundCtx, 30*time.Second)
 
 	if os.Getenv("BATCH_UPDATE_ENABLED") == "true" {
 		common.BatchUpdateEnabled = true
@@ -223,6 +226,12 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(fmt.Sprintf("server forced to shutdown: %v", err))
+	}
+	stopBackgroundTasks()
+	select {
+	case <-quotaAuditRecoveryDone:
+	case <-time.After(5 * time.Second):
+		common.SysError("user quota operation audit recovery did not stop before shutdown timeout")
 	}
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
