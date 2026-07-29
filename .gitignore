@@ -11,6 +11,9 @@ logs
 web/dist
 web/node_modules
 .env
+.env.*
+!.env.example
+!.env.*.example
 one-api
 new-api
 /__debug_bin*
@@ -24,6 +27,20 @@ plans
 .claude
 .cursor
 
+# Local credentials, keys, and secret stores.
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+.netrc
+.npmrc
+.docker/config.json
+credentials/
+secrets/
+service-account*.json
+
+# Generated application artifacts.
 electron/node_modules
 electron/dist
 /data/
