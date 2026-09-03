@@ -93,6 +93,7 @@ const extendedModelFormSchema = z.object({
   description: z.string(),
   icon: z.string(),
   tags: z.array(z.string()),
+  discount: z.number(),
   vendor_id: z.number().optional(),
   endpoints: z.string(),
   name_rule: z.number(),
@@ -363,6 +364,7 @@ export function ModelMutateDrawer({
       description: '',
       icon: '',
       tags: [],
+      discount: 0,
       vendor_id: undefined,
       endpoints: '',
       name_rule: 0,
@@ -431,6 +433,7 @@ export function ModelMutateDrawer({
         description: model.description || '',
         icon: model.icon || '',
         tags: parseModelTags(model.tags),
+        discount: model.discount || 0,
         vendor_id: model.vendor_id,
         endpoints: model.endpoints || '',
         name_rule: model.name_rule || 0,
@@ -456,6 +459,7 @@ export function ModelMutateDrawer({
         description: '',
         icon: '',
         tags: [],
+        discount: 0,
         vendor_id: undefined,
         endpoints: '',
         name_rule: 0,
@@ -785,6 +789,27 @@ export function ModelMutateDrawer({
                         placeholder={t('Describe this model...')}
                         rows={3}
                         {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='discount'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Discount')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        step='0.01'
+                        value={field.value}
+                        onChange={(event) =>
+                          field.onChange(Number(event.target.value))
+                        }
                       />
                     </FormControl>
                     <FormMessage />

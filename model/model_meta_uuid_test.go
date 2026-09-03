@@ -55,3 +55,18 @@ func TestEnsureModelUUIDsBackfillsLegacyRows(t *testing.T) {
 	require.NotEqual(t, models[0].UUID, models[1].UUID)
 	require.True(t, db.Migrator().HasIndex(&Model{}, "idx_models_uuid_unique"))
 }
+
+func TestModelUpdatePersistsZeroDiscount(t *testing.T) {
+	db := setupModelMetaUUIDTestDB(t)
+	require.NoError(t, db.AutoMigrate(&Model{}))
+
+	model := &Model{ModelName: "discount-model", Status: 1, SyncOfficial: 1, Discount: 80}
+	require.NoError(t, model.Insert())
+
+	model.Discount = 0
+	require.NoError(t, model.Update())
+
+	var persisted Model
+	require.NoError(t, db.First(&persisted, model.Id).Error)
+	require.Zero(t, persisted.Discount)
+}
