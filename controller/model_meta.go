@@ -118,11 +118,15 @@ func CreateModelMeta(c *gin.Context) {
 func UpdateModelMeta(c *gin.Context) {
 	statusOnly := c.Query("status_only") == "true"
 
-	var m model.Model
-	if err := c.ShouldBindJSON(&m); err != nil {
+	var request struct {
+		model.Model
+		Discount *float64 `json:"discount"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	m := request.Model
 	if m.Id == 0 {
 		common.ApiErrorMsg(c, "缺少模型 ID")
 		return
@@ -135,6 +139,17 @@ func UpdateModelMeta(c *gin.Context) {
 			return
 		}
 	} else {
+		if request.Discount == nil {
+			var persistedDiscount float64
+			if err := model.DB.Model(&model.Model{}).Select("discount").Where("id = ?", m.Id).Scan(&persistedDiscount).Error; err != nil {
+				common.ApiError(c, err)
+				return
+			}
+			m.Discount = persistedDiscount
+		} else {
+			m.Discount = *request.Discount
+		}
+
 		// 名称冲突检查
 		if dup, err := model.IsModelNameDuplicated(m.Id, m.ModelName); err != nil {
 			common.ApiError(c, err)
