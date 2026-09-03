@@ -39,6 +39,7 @@ export interface Model {
   description?: string
   icon?: string
   tags?: string
+  discount?: number
   vendor_id?: number
   endpoints?: string
   status: number

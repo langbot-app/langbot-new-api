@@ -200,6 +200,7 @@ func TestPricingIncludesLangBotModelMetadata(t *testing.T) {
 		Description:   "LangBot Space model",
 		Icon:          "spark",
 		Tags:          "space,featured",
+		Discount:      80,
 		Status:        1,
 		SyncOfficial:  1,
 		IsFeatured:    true,
@@ -222,6 +223,7 @@ func TestPricingIncludesLangBotModelMetadata(t *testing.T) {
 	assert.Equal(t, "LangBot Space model", pricing.Description)
 	assert.Equal(t, "spark", pricing.Icon)
 	assert.Equal(t, "space,featured", pricing.Tags)
+	assert.Equal(t, 80.0, pricing.Discount)
 	assert.True(t, pricing.IsFeatured)
 	assert.Equal(t, 7, pricing.FeaturedOrder)
 	assert.Equal(t, "chat", pricing.Category)
