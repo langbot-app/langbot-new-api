@@ -30,8 +30,8 @@ type UserQuotaOperation struct {
 	OperationID    string `json:"operation_id" gorm:"column:operation_id;primaryKey;type:varchar(128)"`
 	UserID         int    `json:"user_id" gorm:"column:user_id;not null"`
 	Mode           string `json:"mode" gorm:"column:mode;type:varchar(16);not null"`
-	Value          int    `json:"value" gorm:"column:value;not null"`
-	ResultingQuota int    `json:"resulting_quota" gorm:"column:resulting_quota;not null"`
+	Value          int    `json:"value" gorm:"column:value;type:bigint;not null"`
+	ResultingQuota int    `json:"resulting_quota" gorm:"column:resulting_quota;type:bigint;not null"`
 	CreatedAt      int64  `json:"created_at" gorm:"column:created_at"`
 	UpdatedAt      int64  `json:"updated_at" gorm:"column:updated_at"`
 }
@@ -49,9 +49,9 @@ type UserQuotaOperationAudit struct {
 	IP               string `json:"ip" gorm:"column:ip;type:varchar(64);not null"`
 	TargetUserID     int    `json:"target_user_id" gorm:"column:target_user_id;not null"`
 	Mode             string `json:"mode" gorm:"column:mode;type:varchar(16);not null"`
-	Value            int    `json:"value" gorm:"column:value;not null"`
-	OldQuota         int    `json:"old_quota" gorm:"column:old_quota;not null"`
-	ResultingQuota   int    `json:"resulting_quota" gorm:"column:resulting_quota;not null"`
+	Value            int    `json:"value" gorm:"column:value;type:bigint;not null"`
+	OldQuota         int    `json:"old_quota" gorm:"column:old_quota;type:bigint;not null"`
+	ResultingQuota   int    `json:"resulting_quota" gorm:"column:resulting_quota;type:bigint;not null"`
 	LogRequestID     string `json:"log_request_id" gorm:"column:log_request_id;type:varchar(191);not null"`
 	LoggedAt         int64  `json:"logged_at" gorm:"column:logged_at;not null;default:0"`
 	CreatedAt        int64  `json:"created_at" gorm:"column:created_at"`
@@ -444,8 +444,8 @@ func migrateUserQuotaOperations() error {
 "operation_id" varchar(128) NOT NULL,
 "user_id" integer NOT NULL,
 "mode" varchar(16) NOT NULL,
-"value" integer NOT NULL,
-"resulting_quota" integer NOT NULL,
+"value" bigint NOT NULL,
+"resulting_quota" bigint NOT NULL,
 "created_at" bigint,
 "updated_at" bigint,
 PRIMARY KEY ("operation_id")
@@ -455,14 +455,17 @@ PRIMARY KEY ("operation_id")
 			"`operation_id` varchar(128) NOT NULL,\n" +
 			"`user_id` integer NOT NULL,\n" +
 			"`mode` varchar(16) NOT NULL,\n" +
-			"`value` integer NOT NULL,\n" +
-			"`resulting_quota` integer NOT NULL,\n" +
+			"`value` bigint NOT NULL,\n" +
+			"`resulting_quota` bigint NOT NULL,\n" +
 			"`created_at` bigint,\n" +
 			"`updated_at` bigint,\n" +
 			"PRIMARY KEY (`operation_id`)\n" +
 			")"
 	}
-	return DB.Exec(createSQL).Error
+	if err := DB.Exec(createSQL).Error; err != nil {
+		return err
+	}
+	return widenUserQuotaOperationColumns(&UserQuotaOperation{}, "value", "resulting_quota")
 }
 
 func migrateUserQuotaOperationAudits() error {
@@ -477,9 +480,9 @@ func migrateUserQuotaOperationAudits() error {
 "ip" varchar(64) NOT NULL,
 "target_user_id" integer NOT NULL,
 "mode" varchar(16) NOT NULL,
-"value" integer NOT NULL,
-"old_quota" integer NOT NULL,
-"resulting_quota" integer NOT NULL,
+"value" bigint NOT NULL,
+"old_quota" bigint NOT NULL,
+"resulting_quota" bigint NOT NULL,
 "log_request_id" varchar(191) NOT NULL,
 "logged_at" bigint NOT NULL DEFAULT 0,
 "created_at" bigint,
@@ -496,9 +499,9 @@ PRIMARY KEY ("operation_id")
 			"`ip` varchar(64) NOT NULL,\n" +
 			"`target_user_id` integer NOT NULL,\n" +
 			"`mode` varchar(16) NOT NULL,\n" +
-			"`value` integer NOT NULL,\n" +
-			"`old_quota` integer NOT NULL,\n" +
-			"`resulting_quota` integer NOT NULL,\n" +
+			"`value` bigint NOT NULL,\n" +
+			"`old_quota` bigint NOT NULL,\n" +
+			"`resulting_quota` bigint NOT NULL,\n" +
 			"`log_request_id` varchar(191) NOT NULL,\n" +
 			"`logged_at` bigint NOT NULL DEFAULT 0,\n" +
 			"`created_at` bigint,\n" +
@@ -506,5 +509,31 @@ PRIMARY KEY ("operation_id")
 			"PRIMARY KEY (`operation_id`)\n" +
 			")"
 	}
-	return DB.Exec(createSQL).Error
+	if err := DB.Exec(createSQL).Error; err != nil {
+		return err
+	}
+	return widenUserQuotaOperationColumns(&UserQuotaOperationAudit{}, "value", "old_quota", "resulting_quota")
+}
+
+// Widen existing audit tables as well as creating new ones. SQLite INTEGER is
+// already 64-bit; MySQL and PostgreSQL need an explicit migration.
+func widenUserQuotaOperationColumns(table interface{}, columns ...string) error {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		return nil
+	}
+	for _, column := range columns {
+		columnType, err := DB.Migrator().ColumnTypes(table)
+		if err != nil {
+			return err
+		}
+		for _, existing := range columnType {
+			if existing.Name() == column && !strings.EqualFold(existing.DatabaseTypeName(), "BIGINT") {
+				if err := DB.Migrator().AlterColumn(table, column); err != nil {
+					return err
+				}
+				break
+			}
+		}
+	}
+	return nil
 }
