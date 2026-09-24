@@ -27,13 +27,22 @@ func TestMigrateUserQuotaOperationsCreatesDurableTable(t *testing.T) {
 		OperationID:    "migration-quota-operation",
 		UserID:         12,
 		Mode:           "add",
-		Value:          100,
-		ResultingQuota: 300,
+		Value:          5_000_000_000,
+		ResultingQuota: 500_000_000_000,
 		CreatedAt:      1,
 		UpdatedAt:      1,
 	}
 	require.NoError(t, DB.Create(&operation).Error)
 	assert.Error(t, DB.Create(&operation).Error)
+
+	audit := UserQuotaOperationAudit{
+		OperationID: "migration-quota-audit", OperatorUserID: 1,
+		OperatorUsername: "root", OperatorRole: 100, AuthMethod: "session",
+		IP: "127.0.0.1", TargetUserID: 12, Mode: "override",
+		Value: 500_000_000_000, OldQuota: 99_000_000_000,
+		ResultingQuota: 500_000_000_000, LogRequestID: "quota-bigint-test",
+	}
+	require.NoError(t, DB.Create(&audit).Error)
 
 	require.NoError(t, migrateUserQuotaOperations())
 	require.NoError(t, migrateUserQuotaOperationAudits())
