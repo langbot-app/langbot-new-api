@@ -104,13 +104,27 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 			if inlineGrow > 0 {
 				content.Grow(inlineGrow)
 			}
+			// Consecutive text parts are fragments of one message and must be
+			// concatenated verbatim; only media/code blocks get a separating
+			// newline from their neighbours.
 			appended := 0
+			lastWasText := false
 			writeSep := func() {
 				if appended > 0 {
 					content.WriteByte('\n')
 				}
 				appended++
+				lastWasText = false
 			}
+			writeText := func(text string) {
+				if appended > 0 && !lastWasText {
+					content.WriteByte('\n')
+				}
+				content.WriteString(text)
+				appended++
+				lastWasText = true
+			}
+			var reasoning strings.Builder
 			var toolCalls []dto.ToolCallResponse
 			for _, part := range candidate.Content.Parts {
 				if part.InlineData != nil {
@@ -135,7 +149,7 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 						toolCalls = append(toolCalls, *call)
 					}
 				} else if part.Thought {
-					choice.Message.ReasoningContent = &part.Text
+					reasoning.WriteString(part.Text)
 				} else {
 					if part.ExecutableCode != nil {
 						writeSep()
@@ -149,11 +163,14 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 						content.WriteString("```output\n")
 						content.WriteString(part.CodeExecutionResult.Output)
 						content.WriteString("\n```")
-					} else if part.Text != "\n" {
-						writeSep()
-						content.WriteString(part.Text)
+					} else if part.Text != "" {
+						writeText(part.Text)
 					}
 				}
+			}
+			if reasoning.Len() > 0 {
+				reasoningText := reasoning.String()
+				choice.Message.ReasoningContent = &reasoningText
 			}
 			if len(toolCalls) > 0 {
 				choice.Message.SetToolCalls(toolCalls)
@@ -204,15 +221,27 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 		if inlineGrow > 0 {
 			content.Grow(inlineGrow)
 		}
+		// Text parts within a chunk are concatenated verbatim (see the
+		// non-stream converter); only media/code blocks are newline-separated.
 		appended := 0
+		lastWasText := false
 		writeSep := func() {
 			if appended > 0 {
 				content.WriteByte('\n')
 			}
 			appended++
+			lastWasText = false
 		}
+		writeText := func(text string) {
+			if appended > 0 && !lastWasText {
+				content.WriteByte('\n')
+			}
+			content.WriteString(text)
+			appended++
+			lastWasText = true
+		}
+		var reasoning strings.Builder
 		isTools := false
-		isThought := false
 		if candidate.FinishReason != nil {
 			switch *candidate.FinishReason {
 			case "STOP":
@@ -242,9 +271,7 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 					choice.Delta.ToolCalls = append(choice.Delta.ToolCalls, *call)
 				}
 			} else if part.Thought {
-				isThought = true
-				writeSep()
-				content.WriteString(part.Text)
+				reasoning.WriteString(part.Text)
 			} else {
 				if part.ExecutableCode != nil {
 					writeSep()
@@ -258,15 +285,15 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 					content.WriteString("```output\n")
 					content.WriteString(part.CodeExecutionResult.Output)
 					content.WriteString("\n```\n")
-				} else if part.Text != "\n" {
-					writeSep()
-					content.WriteString(part.Text)
+				} else if part.Text != "" {
+					writeText(part.Text)
 				}
 			}
 		}
-		if isThought {
-			choice.Delta.SetReasoningContent(content.String())
-		} else {
+		if reasoning.Len() > 0 {
+			choice.Delta.SetReasoningContent(reasoning.String())
+		}
+		if content.Len() > 0 || reasoning.Len() == 0 {
 			choice.Delta.SetContentString(content.String())
 		}
 		if isTools {
