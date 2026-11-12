@@ -202,6 +202,13 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 			return newApiErr
 		}
+
+		if info.IsStream {
+			if streamErr := service.UpstreamStreamErrorBody(c.Request.Context(), httpResp); streamErr != nil {
+				service.ResetStatusCode(streamErr, statusCodeMappingStr)
+				return streamErr
+			}
+		}
 	}
 
 	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)
