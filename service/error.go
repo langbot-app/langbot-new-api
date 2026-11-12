@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -226,4 +228,68 @@ func TaskErrorFromAPIError(apiErr *types.NewAPIError) *dto.TaskError {
 		StatusCode: apiErr.StatusCode,
 		Error:      apiErr.Err,
 	}
+}
+
+type peekedResponseBody struct {
+	io.Reader
+	io.Closer
+}
+
+// UpstreamStreamErrorBody detects an upstream that answers a streaming request
+// with HTTP 200 but a plain JSON error document instead of SSE events (seen on
+// Gemini relays when the upstream rejects the request). Valid SSE never starts
+// with '{', so such a body is converted into a relay error; otherwise the body
+// is left untouched for the stream handler.
+func UpstreamStreamErrorBody(ctx context.Context, resp *http.Response) *types.NewAPIError {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+	reader := bufio.NewReaderSize(resp.Body, 64<<10)
+	resp.Body = peekedResponseBody{Reader: reader, Closer: resp.Body}
+
+	var first byte
+	for i := 1; i <= 4096; i++ {
+		peeked, _ := reader.Peek(i)
+		if len(peeked) < i {
+			return nil
+		}
+		ch := peeked[i-1]
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			continue
+		}
+		first = ch
+		break
+	}
+	if first != '{' {
+		return nil
+	}
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return nil
+	}
+	var errResponse struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if common.Unmarshal(body, &errResponse) != nil || len(errResponse.Error) == 0 || string(errResponse.Error) == "null" {
+		resp.Body = peekedResponseBody{Reader: bytes.NewReader(body), Closer: resp.Body.(peekedResponseBody).Closer}
+		return nil
+	}
+
+	statusCode := http.StatusBadGateway
+	var errorObject struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if common.Unmarshal(errResponse.Error, &errorObject) == nil {
+		if code, convErr := strconv.Atoi(strings.Trim(string(errorObject.Code), `"`)); convErr == nil && code >= 400 && code <= 599 {
+			statusCode = code
+		}
+	}
+	errResp := &http.Response{
+		StatusCode: statusCode,
+		Header:     resp.Header,
+		Body:       io.NopCloser(bytes.NewReader(body)),
+	}
+	_ = resp.Body.Close()
+	return RelayErrorHandler(ctx, errResp, false)
 }

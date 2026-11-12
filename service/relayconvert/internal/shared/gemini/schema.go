@@ -72,6 +72,8 @@ func cleanGeminiFunctionParametersWithDepth(params interface{}, depth int) inter
 			cleanedMap["items"] = cleanGeminiFunctionParametersWithDepth(itemsArray[0], depth+1)
 		}
 
+		ensureGeminiArrayItems(cleanedMap)
+
 		if nested, ok := cleanedMap["anyOf"].([]interface{}); ok && nested != nil {
 			cleanedNested := make([]interface{}, len(nested))
 			for i, item := range nested {
@@ -105,12 +107,26 @@ func cleanGeminiFunctionParametersShallow(params interface{}) interface{} {
 		delete(cleanedMap, "properties")
 		delete(cleanedMap, "items")
 		delete(cleanedMap, "anyOf")
+		ensureGeminiArrayItems(cleanedMap)
 		return cleanedMap
 	case []interface{}:
 		return []interface{}{}
 	default:
 		return params
 	}
+}
+
+// ensureGeminiArrayItems gives an ARRAY schema without a usable "items" an
+// unconstrained item schema. JSON Schema allows a bare {"type":"array"} (MCP
+// servers emit it), but Gemini rejects it with "items: missing field".
+func ensureGeminiArrayItems(schema map[string]interface{}) {
+	if schema["type"] != "ARRAY" {
+		return
+	}
+	if items, ok := schema["items"].(map[string]interface{}); ok && items != nil {
+		return
+	}
+	schema["items"] = map[string]interface{}{}
 }
 
 func normalizeGeminiSchemaTypeAndNullable(schema map[string]interface{}) {

@@ -192,6 +192,13 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 			return newAPIError
 		}
+
+		if info.IsStream {
+			if streamErr := service.UpstreamStreamErrorBody(c.Request.Context(), httpResp); streamErr != nil {
+				service.ResetStatusCode(streamErr, statusCodeMappingStr)
+				return streamErr
+			}
+		}
 	}
 
 	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
@@ -292,6 +299,13 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 			return newAPIError
+		}
+
+		if info.IsStream {
+			if streamErr := service.UpstreamStreamErrorBody(c.Request.Context(), httpResp); streamErr != nil {
+				service.ResetStatusCode(streamErr, statusCodeMappingStr)
+				return streamErr
+			}
 		}
 	}
 
